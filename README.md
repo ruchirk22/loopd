@@ -167,7 +167,32 @@ scripted fake PM/dev.
 - **Sandbox is mandatory for real work.** `bypassPermissions` skips approval prompts;
   that is only acceptable inside the container / a throwaway worktree.
 - **Gate commands come from an LLM** and run with `shell=True`. Fine inside the
-  sandbox; never run an untrusted plan on your host.
+  sandbox; never run an untrusted plan on your host. Each gate runs in its own process
+  group and is group-killed on timeout, and git runs with hooks disabled so a
+  dev-planted `.git/hooks` script can't execute under the orchestrator.
 - **Money:** Opus 4.8 on both agents is powerful and not cheap. The budget is checked
-  after *every* CLI call (planning and seeding included) and a budget stop is
-  resumable — start conservative and raise deliberately.
+  after *every* CLI call (planning and seeding included; a timed-out call is charged an
+  estimate rather than $0) and a budget stop is resumable — start conservative and raise
+  deliberately.
+
+### Trust boundary (what the rails do and don't guarantee)
+
+The verification spine is hardened but not a sandbox against a *malicious* PM — the PM
+and developer are the same model, so this is defense against sloppiness and drift, not a
+cryptographic guarantee:
+
+- **Gate authorship is trusted.** The orchestrator screens verify commands for
+  triviality (`true || pytest`, `ls`, `test -d .`, comment-only, etc. are rejected) and
+  flags edits to gate-defining files (`package.json`, `Makefile`, `pytest.ini`, …), but a
+  determined PM could still author a weak-but-non-trivial check. Spot-check the `verify`
+  lists on early runs; the final pristine-worktree verification + regression sweep is the
+  backstop.
+- **`.agentic/` lives inside the target repo** (for observability) and the developer has
+  write access there. During a run its state is held in memory and rewritten, but a brief
+  or state file tampered with between a stop and `--resume-run` is trusted on reload
+  (resume validates the schema/version, not authenticity). If that matters for your threat
+  model, run each step in a fresh container.
+- **Evidence proves the PM read the packet, not that the code is correct.** Accept
+  requires verbatim quotes from the diff/gate transcript per criterion; that stops
+  rubber-stamping, not a PM that genuinely misjudges. Deterministic gates remain the
+  arbiter of "done".

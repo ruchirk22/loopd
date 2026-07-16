@@ -7,22 +7,32 @@ Commands may carry a per-command timeout prefix: "timeout=900;npm run build".
 Optional `setup` commands run first (a setup failure fails the gate); optional
 `teardown` commands ALWAYS run afterwards (failures are logged, not fatal).
 
+Each command runs in its OWN process group; on timeout the whole group is killed, so
+a check that backgrounds a server (or a build that spawns workers) cannot leak
+processes that poison later gates or the final regression sweep.
+
 NOTE: the commands come from the PM (an LLM), and run with shell=True. That is
 acceptable ONLY because this runs inside the sandbox. Do not run untrusted plans
-on your host."""
+on your host. Gate authorship is a trust boundary, not a guarantee — see plan.py's
+trivial-command screening and the README's honesty notes."""
 from __future__ import annotations
 
+import os
 import re
+import signal
 import subprocess
+import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+# Only treat "timeout=N;" as our prefix when the remainder does NOT reference $timeout
+# (otherwise we would eat a legitimate shell variable assignment).
 _TIMEOUT_PREFIX = re.compile(r"^timeout=(\d+)\s*;\s*(.+)$", re.DOTALL)
 
 
 def _split_timeout(cmd: str, default_s: int) -> Tuple[int, str]:
     m = _TIMEOUT_PREFIX.match(cmd.strip())
-    if m:
+    if m and not re.search(r"\$\{?timeout\b", m.group(2)):
         return int(m.group(1)), m.group(2)
     return default_s, cmd
 
@@ -30,22 +40,42 @@ def _split_timeout(cmd: str, default_s: int) -> Tuple[int, str]:
 def _run_one(cmd: str, cwd: Path, timeout_s: int, logs: List[str]) -> bool:
     per_timeout, real_cmd = _split_timeout(cmd, timeout_s)
     logs.append(f"$ {real_cmd}")
+    # start_new_session=True => the child is its own process-group leader (pgid == pid),
+    # so we can kill the whole tree on timeout.
+    proc = subprocess.Popen(real_cmd, cwd=str(cwd), shell=True, start_new_session=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
-        p = subprocess.run(
-            real_cmd, cwd=str(cwd), shell=True,
-            capture_output=True, text=True, timeout=per_timeout,
-        )
+        out, _ = proc.communicate(timeout=per_timeout)
     except subprocess.TimeoutExpired:
-        logs.append(f"[TIMEOUT after {per_timeout}s]")
+        _kill_group(proc)
+        try:
+            out, _ = proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            out = ""
+        if out and out.strip():
+            logs.append(out.rstrip())
+        logs.append(f"[TIMEOUT after {per_timeout}s — process group killed]")
         return False
-    out = (p.stdout or "") + (p.stderr or "")
-    if out.strip():
+    if out and out.strip():
         logs.append(out.rstrip())
-    if p.returncode != 0:
-        logs.append(f"[FAILED: exit {p.returncode}]")
+    if proc.returncode != 0:
+        logs.append(f"[FAILED: exit {proc.returncode}]")
         return False
     logs.append("[ok]")
     return True
+
+
+def _kill_group(proc: subprocess.Popen) -> None:
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(proc.pid, sig)  # pgid == pid thanks to start_new_session
+        except (ProcessLookupError, PermissionError, OSError):
+            return
+        try:
+            proc.wait(timeout=5)
+            return
+        except subprocess.TimeoutExpired:
+            continue
 
 
 def run_gates(
@@ -65,15 +95,17 @@ def run_gates(
         for cmd in (setup or []):
             logs.append("[setup]")
             if not _run_one(cmd, cwd, timeout_s, logs):
-                return False, "\n".join(logs)
-        for cmd in commands:
-            if not _run_one(cmd, cwd, timeout_s, logs):
                 passed = False
                 break
+        if passed:
+            for cmd in commands:
+                if not _run_one(cmd, cwd, timeout_s, logs):
+                    passed = False
+                    break
     finally:
         for cmd in (teardown or []):
             logs.append("[teardown]")
             if not _run_one(cmd, cwd, timeout_s, logs):
                 logs.append("[teardown failure ignored]")
-
+    # Built AFTER the finally block so teardown output is always in the transcript.
     return passed, "\n".join(logs)

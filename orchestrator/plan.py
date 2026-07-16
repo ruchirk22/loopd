@@ -6,16 +6,16 @@ from __future__ import annotations
 
 import copy
 import re
+import shlex
 from dataclasses import dataclass, field, asdict
 from typing import List, Optional
 
-# Commands that "verify" nothing. Matched against the normalized command string.
-_TRIVIAL_EXACT = {"true", ":", "exit 0", "test 1", "test true"}
-_TRIVIAL_RE = [
-    re.compile(r"^echo\b[^|&;>]*$"),      # bare echo (not piped/chained into a real check)
-    re.compile(r"^printf\b[^|&;>]*$"),
-    re.compile(r"^sleep\s+\d+$"),
-]
+# Executables that, on their own, verify nothing (regardless of args).
+_NOOP_CMDS = {"true", ":", "false", "echo", "printf", "sleep", "pwd", "cat", "ls",
+              "cd", "export", "exit", "read", ""}
+# `test`/`[` forms that are constant-true.
+_ALWAYS_TRUE_TEST = {"1", "true", "-d .", "-e .", "-d ./", "-f .", "1 -eq 1",
+                     "0 -eq 0", "-n x", "x = x"}
 
 PENDING, IN_PROGRESS, DONE, SKIPPED = "pending", "in_progress", "done", "skipped"
 
@@ -26,13 +26,70 @@ class PlanValidationError(ValueError):
         super().__init__("; ".join(problems))
 
 
-def is_trivial_command(cmd: str) -> bool:
-    norm = " ".join(cmd.strip().split())
-    # strip a timeout= prefix before judging
-    norm = re.sub(r"^timeout=\d+\s*;\s*", "", norm)
-    if norm.lower() in _TRIVIAL_EXACT:
+def _base_exe(token: str) -> str:
+    """Strip a path and env-var prefixes: '/usr/bin/true' -> 'true'."""
+    return token.rsplit("/", 1)[-1]
+
+
+def _clause_is_noop(clause: str) -> bool:
+    """Does this single (operator-free) clause verify nothing?"""
+    clause = clause.strip()
+    if not clause or clause.startswith("#"):
         return True
-    return any(rx.match(norm) for rx in _TRIVIAL_RE)
+    try:
+        toks = shlex.split(clause, comments=True)
+    except ValueError:
+        return False  # unparseable → not obviously trivial; let it run
+    if not toks:
+        return True
+    exe = _base_exe(toks[0])
+    if exe in _NOOP_CMDS:
+        return True
+    if exe in ("test", "["):
+        rest = " ".join(t for t in toks[1:] if t != "]").strip()
+        if rest in _ALWAYS_TRUE_TEST:
+            return True
+    return False
+
+
+def _can_fail(expr: str) -> bool:
+    """Can this shell expression ever exit non-zero — i.e. does it actually check
+    anything? Models real exit-status semantics for ; && || and pipes, so it screens
+    the demonstrated bypasses ('true || pytest', 'echo && true', 'pytest || true') while
+    NOT flagging genuine checks ('test -f x && echo ok')."""
+    expr = expr.strip()
+    if not expr:
+        return False
+    # `;` and newline: only the LAST segment sets the exit status (earlier fails masked).
+    seq = [s for s in re.split(r"[;\n]", expr) if s.strip()]
+    if len(seq) > 1:
+        return _can_fail(seq[-1])
+    # `&&` / `||` (equal precedence, left-associative). Fold left tracking can_fail.
+    parts = re.split(r"(&&|\|\|)", expr)
+    cf = _can_fail_pipe(parts[0])
+    i = 1
+    while i < len(parts) - 1:
+        op, rhs = parts[i].strip(), parts[i + 1]
+        rhs_cf = _can_fail_pipe(rhs)
+        cf = (cf or rhs_cf) if op == "&&" else (cf and rhs_cf)
+        i += 2
+    return cf
+
+
+def _can_fail_pipe(expr: str) -> bool:
+    # In a pipeline `A | B | C` the exit status is the last stage (pipefail off).
+    stages = expr.split("|")
+    return not _clause_is_noop(stages[-1])
+
+
+def is_trivial_command(cmd: str) -> bool:
+    """True if the command verifies nothing — it is (or can short-circuit to) a command
+    that always exits 0 regardless of whether the real work was done."""
+    norm = cmd.strip()
+    norm = re.sub(r"^timeout=\d+\s*;\s*", "", norm)
+    if not norm or norm.startswith("#"):
+        return True
+    return not _can_fail(norm)
 
 
 @dataclass
@@ -48,6 +105,7 @@ class Step:
     attempts: int = 0
     rejections: int = 0
     cost_usd: float = 0.0
+    base_sha: str = ""       # HEAD when this step started — detects a crash-window commit
     commit_sha: str = ""
     dev_session_id: str = ""
     dev_summary: str = ""
@@ -70,6 +128,7 @@ class Step:
             attempts=int(d.get("attempts", 0)),
             rejections=int(d.get("rejections", 0)),
             cost_usd=float(d.get("cost_usd", 0.0)),
+            base_sha=str(d.get("base_sha", "") or ""),
             commit_sha=str(d.get("commit_sha", "") or ""),
             dev_session_id=str(d.get("dev_session_id", "") or ""),
             dev_summary=str(d.get("dev_summary", "") or ""),
@@ -191,6 +250,8 @@ def apply_mutations(plan: Plan, ops: List[dict]) -> Plan:
             if target.status in (DONE, SKIPPED):
                 problems.append(f"update: step {target.id!r} is {target.status} and immutable")
                 continue
+            before = (target.goal, target.details, tuple(target.acceptance_criteria),
+                      tuple(target.verify), tuple(target.setup), tuple(target.teardown))
             for key in ("goal", "details"):
                 if key in patch and patch[key] is not None:
                     setattr(target, key, str(patch[key]))
@@ -200,7 +261,13 @@ def apply_mutations(plan: Plan, ops: List[dict]) -> Plan:
                     if isinstance(val, str):
                         val = [val]
                     setattr(target, key, [str(v) for v in val])
-            # a materially updated step gets a clean slate for retries
+            after = (target.goal, target.details, tuple(target.acceptance_criteria),
+                     tuple(target.verify), tuple(target.setup), tuple(target.teardown))
+            if after == before:
+                problems.append(f"update: step {target.id!r} changes nothing — an "
+                                "empty update cannot be used to reset the retry caps")
+                continue
+            # only a MATERIALLY changed step earns a clean retry slate
             target.attempts = 0
             target.rejections = 0
         elif kind == "remove":

@@ -52,6 +52,10 @@ class Config:
     # --- Timeouts ---
     call_timeout_s: int = field(default_factory=lambda: int(_env("CALL_TIMEOUT_S", "3600")))
     gate_timeout_s: int = field(default_factory=lambda: int(_env("GATE_TIMEOUT_S", "1800")))
+    # A timed-out CLI call reports $0 (the process was killed) but the API work was
+    # billed. Charge at least this, or the largest per-call cost seen so far, so the
+    # budget rail is not blind on the exact call it most needs to catch.
+    timeout_cost_usd: float = field(default_factory=lambda: float(_env("TIMEOUT_COST_USD", "1.0")))
 
     # Permission mode for the DEVELOPER. `bypassPermissions` means no approval prompts —
     # ONLY safe because the developer runs inside the sandbox (container / worktree).

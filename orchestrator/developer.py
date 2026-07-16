@@ -36,6 +36,7 @@ def run_prompt(prompt: str, cfg: Config, resume_session: Optional[str] = None) -
         json_schema=DEV_SUMMARY_SCHEMA,
         max_turns=cfg.max_turns_per_call,
         timeout_s=cfg.call_timeout_s,
+        timeout_cost_usd=cfg.timeout_cost_usd,
     )
 
 

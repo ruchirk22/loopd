@@ -95,6 +95,7 @@ def ensure_brief(cfg: Config, ledger: Ledger, task: Optional[str]) -> str:
             json_schema=BRIEF_SCHEMA,
             max_turns=cfg.max_turns_per_call,
             timeout_s=cfg.call_timeout_s,
+            timeout_cost_usd=cfg.timeout_cost_usd,
         )
         ledger.spend(res.cost_usd)
         if not res.ok or not res.structured:

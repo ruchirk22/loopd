@@ -28,6 +28,21 @@ import urllib.error
 import urllib.request
 
 
+def _killpg(pid: int, wait: "subprocess.Popen | None" = None) -> None:
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pid, sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            return
+        if wait is not None:
+            try:
+                wait.wait(timeout=5)
+                return
+            except subprocess.TimeoutExpired:
+                continue
+        return
+
+
 def _fail(msg: str) -> int:
     print(f"PROBE FAIL: {msg}")
     return 1
@@ -38,16 +53,25 @@ def _ok(msg: str) -> int:
     return 0
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None  # assert the FIRST response's status, not the redirect target's
+
+
 def probe_http(args) -> int:
     deadline = time.time() + args.timeout
     last_err = "no attempt made"
+    opener = (urllib.request.build_opener(_NoRedirect) if not args.follow_redirects
+              else urllib.request.build_opener())
     while time.time() < deadline:
         try:
             req = urllib.request.Request(args.url, method=args.method)
-            with urllib.request.urlopen(req, timeout=min(10, args.timeout)) as resp:
+            with opener.open(req, timeout=min(10, args.timeout)) as resp:
                 body = resp.read(65536).decode("utf-8", errors="replace")
                 status = resp.status
         except urllib.error.HTTPError as e:
+            # A 3xx surfaces here as an HTTPError when redirects are suppressed — that's
+            # the status we want to assert, not a failure.
             status = e.code
             body = (e.read(65536) or b"").decode("utf-8", errors="replace")
         except (urllib.error.URLError, OSError, TimeoutError) as e:
@@ -113,6 +137,11 @@ def probe_env_file(args) -> int:
                 continue
             key, _, val = line.partition("=")
             key = key.removeprefix("export ").strip()
+            val = val.strip()
+            # Strip one matching pair of surrounding quotes so KEY="" counts as EMPTY,
+            # not defined (the standard placeholder a dev scaffolds without a value).
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+                val = val[1:-1]
             if val.strip():
                 keys.add(key)
     required = [k.strip() for k in args.requires.split(",") if k.strip()]
@@ -125,21 +154,17 @@ def probe_env_file(args) -> int:
 def probe_proc_up(args) -> int:
     proc = subprocess.Popen(args.start, shell=True, cwd=args.cwd or None,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, preexec_fn=os.setsid)
+                            text=True, start_new_session=True)
     captured: list = []
     # A reader thread avoids platform-specific non-blocking-read quirks on text pipes.
     threading.Thread(target=lambda: captured.extend(iter(proc.stdout.readline, "")),
                      daemon=True).start()
 
     def teardown():
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (ProcessLookupError, OSError):
-            pass
+        # setsid guarantees pgid == proc.pid, so kill the group by pid directly — do NOT
+        # go through getpgid(), which raises once the shell leader is reaped and would
+        # then skip the kill, leaking a backgrounded server.
+        _killpg(proc.pid, wait=proc)
 
     try:
         deadline = time.time() + args.timeout
@@ -160,14 +185,20 @@ def probe_proc_up(args) -> int:
         print(f"PROBE: process is up ({args.start[:80]!r})")
         for cmd in args.then or []:
             print(f"PROBE THEN: $ {cmd}")
-            p = subprocess.run(cmd, shell=True, cwd=args.cwd or None,
-                               capture_output=True, text=True, timeout=args.timeout)
-            sys.stdout.write((p.stdout or "") + (p.stderr or ""))
-            if p.returncode != 0:
-                return _fail(f"--then command exited {p.returncode}: {cmd}")
+            remaining = max(1, int(deadline - time.time()))
+            # Own process group so a hung --then (e.g. playwright spawning browsers)
+            # is fully killed on timeout instead of leaking grandchildren.
+            tp = subprocess.Popen(cmd, shell=True, cwd=args.cwd or None, start_new_session=True,
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            try:
+                out, _ = tp.communicate(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                _killpg(tp.pid)
+                return _fail(f"--then command timed out: {cmd}")
+            sys.stdout.write(out or "")
+            if tp.returncode != 0:
+                return _fail(f"--then command exited {tp.returncode}: {cmd}")
         return _ok("process came up and all --then checks passed")
-    except subprocess.TimeoutExpired:
-        return _fail("a --then command timed out")
     finally:
         teardown()
 
@@ -182,6 +213,8 @@ def main(argv=None) -> int:
     p.add_argument("--method", default="GET")
     p.add_argument("--expect-status", type=int, default=200)
     p.add_argument("--expect-body", default="")
+    p.add_argument("--follow-redirects", action="store_true",
+                   help="follow 3xx (default: assert the first response's status)")
     p.add_argument("--timeout", type=int, default=30)
     p.add_argument("--interval", type=float, default=1.0)
     p.set_defaults(fn=probe_http)

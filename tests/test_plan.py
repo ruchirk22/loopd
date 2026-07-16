@@ -18,13 +18,17 @@ def step_dict(sid="1", **kw):
 class TestTrivialCommands(unittest.TestCase):
     def test_trivial(self):
         for cmd in ["true", ":", "exit 0", "echo ok", "echo done  ", "printf hi",
-                    "sleep 5", "timeout=60;true", "TRUE"]:
+                    "sleep 5", "timeout=60;true", "ls", "pwd", "cat README.md",
+                    "test -d .", "test 1 -eq 1", "/usr/bin/true", "# verified manually",
+                    "true || pytest", "pytest || true", "echo x && true",
+                    "sleep 1 && true", "pytest ; true", "make check || echo skipped"]:
             self.assertTrue(is_trivial_command(cmd), cmd)
 
     def test_not_trivial(self):
         for cmd in ["pytest -q", "npm test", "echo hi | grep hi",
                     "test -f out.txt && echo ok", "python3 -m orchestrator.probe port --port 80",
-                    "timeout=900;npm run build"]:
+                    "timeout=900;npm run build", "true ; pytest -q", "npm ci && npm test",
+                    "test -f out.txt"]:
             self.assertFalse(is_trivial_command(cmd), cmd)
 
 

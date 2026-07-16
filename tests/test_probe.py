@@ -16,6 +16,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if self.path == "/health":
             body = b'{"status":"ok"}'
             self.send_response(200)
+        elif self.path == "/old":
+            self.send_response(302)
+            self.send_header("Location", "/health")
+            self.end_headers()
+            return
         else:
             body = b"nope"
             self.send_response(404)
@@ -64,6 +69,20 @@ class TestProbes(unittest.TestCase):
         rc = probe_main(["port", "--port", str(free), "--timeout", "1", "--interval", "0.2"])
         self.assertEqual(rc, 1)
 
+    def test_http_redirect_not_followed_by_default(self):
+        # 3xx status is asserted directly, not the redirect target's 200
+        self.assertEqual(probe_main(["http", "--url", f"http://127.0.0.1:{self.port}/old",
+                                     "--expect-status", "302", "--timeout", "3"]), 0)
+        # a false-pass is prevented: /old does NOT itself serve 200
+        self.assertEqual(probe_main(["http", "--url", f"http://127.0.0.1:{self.port}/old",
+                                     "--expect-status", "200", "--timeout", "2",
+                                     "--interval", "0.2"]), 1)
+
+    def test_http_follow_redirects_opt_in(self):
+        self.assertEqual(probe_main(["http", "--url", f"http://127.0.0.1:{self.port}/old",
+                                     "--expect-status", "200", "--expect-body", "ok",
+                                     "--follow-redirects", "--timeout", "3"]), 0)
+
     def test_env_file(self):
         p = Path(tempfile.mkdtemp()) / ".env"
         p.write_text("# comment\nDATABASE_URL=postgres://x\nexport GCS_BUCKET=b\nEMPTY=\n")
@@ -73,6 +92,13 @@ class TestProbes(unittest.TestCase):
                                      "--requires", "DATABASE_URL,EMPTY"]), 1)
         self.assertEqual(probe_main(["env-file", "--path", str(p) + ".nope",
                                      "--requires", "X"]), 1)
+
+    def test_env_file_quoted_empty_is_not_defined(self):
+        p = Path(tempfile.mkdtemp()) / ".env"
+        p.write_text('DATABASE_URL=""\nGCS_BUCKET=\'\'\nREAL="value"\n')
+        self.assertEqual(probe_main(["env-file", "--path", str(p), "--requires", "REAL"]), 0)
+        self.assertEqual(probe_main(["env-file", "--path", str(p), "--requires", "DATABASE_URL"]), 1)
+        self.assertEqual(probe_main(["env-file", "--path", str(p), "--requires", "GCS_BUCKET"]), 1)
 
     def test_proc_up_ready_log_then_check_and_teardown(self):
         start = ('python3 -c "import time,sys; print(\'READY\', flush=True); time.sleep(30)"')

@@ -19,7 +19,7 @@ from typing import List, Optional, Tuple
 from . import developer, gates
 from .config import Config
 from .handover import Handover, build_handover
-from .ledger import BudgetExceeded, Ledger, NoChangesError
+from .ledger import BudgetExceeded, GitError, Ledger, NoChangesError
 from .plan import (DONE, IN_PROGRESS, SKIPPED, Plan, PlanValidationError, Step,
                    apply_mutations)
 from .pm import PMSession, PMTurnError, validate_directive
@@ -50,6 +50,22 @@ def run(task: Optional[str], cfg: Config, resume: bool = False, fresh: bool = Fa
         return 1
     except RunAborted as exc:
         return exc.code
+    except GitError as exc:
+        # A mid-run git failure (index.lock, disk full, worktree add) is resumable —
+        # not a pre-loop setup failure. Keep it inside the contract (exit 1) with guidance.
+        plan = ledger.load_plan()
+        path = ledger.write_escalation("git_error", plan, detail=str(exc))
+        print("\n" + ledger.report(plan))
+        print(f"\nStopping on a git error: {exc}\n"
+              f"State is saved — fix the repo and continue with --resume-run. Escalation report: {path}")
+        return 1
+    except Exception as exc:  # never let an unexpected error escape as a bare traceback
+        plan = ledger.load_plan()
+        path = ledger.write_escalation("unexpected_error", plan, detail=f"{type(exc).__name__}: {exc}")
+        print("\n" + ledger.report(plan))
+        print(f"\nStopping on an unexpected error ({type(exc).__name__}): {exc}\n"
+              f"State is saved — continue with --resume-run. Escalation report: {path}")
+        return 1
 
 
 def _run(task: Optional[str], cfg: Config, ledger: Ledger, resume: bool) -> int:
@@ -120,6 +136,8 @@ def _plan_phase(pm: PMSession, ledger: Ledger, cfg: Config) -> Plan:
 def _step_phase(pm: PMSession, step: Step, plan: Plan, ledger: Ledger, cfg: Config) -> Plan:
     print(f"→ Step {step.id}: {step.goal}")
     step.status = IN_PROGRESS
+    if not step.base_sha:
+        step.base_sha = ledger.head_sha()  # baseline for crash-window commit detection
     ledger.save_plan(plan)
 
     d = pm.dispatch_turn(step, plan)
@@ -149,8 +167,9 @@ def _step_phase(pm: PMSession, step: Step, plan: Plan, ledger: Ledger, cfg: Conf
             # gates red after all inner retries: accepting is structurally impossible
             allowed = ["replan", "descope", "abort"]
 
-        d = pm.review_turn(step, ho.text, allowed, plan)
-        d = _valid_directive(pm, d, allowed, plan, ledger, cfg, step, ho.text)
+        d = pm.review_turn(step, ho.text, allowed, plan, high_risk=ho.high_risk)
+        d = _valid_directive(pm, d, allowed, plan, ledger, cfg, step, ho.text,
+                             require_integrity_ack=ho.high_risk)
 
         while True:  # resolve the verdict for THIS handover
             v = d["verdict"]
@@ -159,6 +178,15 @@ def _step_phase(pm: PMSession, step: Step, plan: Plan, ledger: Ledger, cfg: Conf
                 try:
                     sha = ledger.commit_step(step, d.get("commit_message", ""))
                 except NoChangesError as e:
+                    # Crash-window reconciliation: if this step's work is ALREADY in HEAD
+                    # (accepted+committed just before a crash, now re-run and no-op), adopt
+                    # that commit instead of forcing a futile reject/descope.
+                    adopted = ledger.adopt_head_if_matches(step)
+                    if adopted:
+                        step.status = DONE
+                        ledger.save_plan(plan)
+                        print(f"   ✓ accepted (work already committed as {adopted[:9]})\n")
+                        return plan
                     allowed = [a for a in allowed if a != "accept"]
                     ledger.log({"event": "accept_refused_no_changes", "step": step.id})
                     d = pm.corrective_turn(
@@ -167,7 +195,7 @@ def _step_phase(pm: PMSession, step: Step, plan: Plan, ledger: Ledger, cfg: Conf
                     d = _valid_directive(pm, d, allowed, plan, ledger, cfg, step, ho.text)
                     continue
                 step.status = DONE
-                ledger.save_plan(plan)
+                ledger.save_plan(plan)  # near-atomic with the commit; resume reconciles the gap
                 print(f"   ✓ accepted, committed {sha[:9]}\n")
                 return plan
             if v == "reject":
@@ -178,7 +206,9 @@ def _step_phase(pm: PMSession, step: Step, plan: Plan, ledger: Ledger, cfg: Conf
                 print(f"   ✗ PM rejected (feedback sent to developer, "
                       f"rejection {step.rejections}/{cfg.max_rejections_per_step})")
                 prompt = d["next_prompt"]
-                resume_sid = step.dev_session_id or None
+                # Honor the PM's choice of a fresh developer session (e.g. the current
+                # one is contaminated); default to resuming the same session.
+                resume_sid = None if d.get("dev_session") == "fresh" else (step.dev_session_id or None)
                 break  # back to the dev loop with the PM's feedback
             if v == "replan":
                 return _apply_replan(pm, d, plan, ledger, cfg, step)
@@ -249,7 +279,7 @@ def _finalize_phase(pm: PMSession, plan: Plan, ledger: Ledger,
     if d["verdict"] == "abort":
         _abort(ledger, plan, d)
     if d["verdict"] == "replan":
-        return None, _apply_replan(pm, d, plan, ledger, cfg)
+        return None, _apply_replan(pm, d, plan, ledger, cfg, require_pending=True)
 
     final_cmds = [str(c) for c in d["final_verify"] if str(c).strip()] + list(cfg.final_verify_extra)
     print("Final verification in a pristine worktree…")
@@ -266,7 +296,7 @@ def _finalize_phase(pm: PMSession, plan: Plan, ledger: Ledger,
     d = _valid_directive(pm, d, ["replan", "abort"], plan, ledger, cfg)
     if d["verdict"] == "abort":
         _abort(ledger, plan, d)
-    return None, _apply_replan(pm, d, plan, ledger, cfg)
+    return None, _apply_replan(pm, d, plan, ledger, cfg, require_pending=True)
 
 
 def _final_verification(final_cmds: List[str], plan: Plan, ledger: Ledger,
@@ -289,13 +319,13 @@ def _final_verification(final_cmds: List[str], plan: Plan, ledger: Ledger,
 
 def _valid_directive(pm: PMSession, d: dict, allowed: List[str], plan: Plan,
                      ledger: Ledger, cfg: Config, step: Optional[Step] = None,
-                     handover_text: str = "") -> dict:
-    problems = validate_directive(d, allowed, step, handover_text)
+                     handover_text: str = "", require_integrity_ack: bool = False) -> dict:
+    problems = validate_directive(d, allowed, step, handover_text, require_integrity_ack)
     if not problems:
         return d
     ledger.log({"event": "directive_refused", "problems": problems[:10]})
     d = pm.corrective_turn(problems, allowed, plan, step)
-    problems = validate_directive(d, allowed, step, handover_text)
+    problems = validate_directive(d, allowed, step, handover_text, require_integrity_ack)
     if problems:
         detail = "; ".join(problems)
         ledger.write_escalation("invalid_directive", plan, detail=detail,
@@ -307,7 +337,7 @@ def _valid_directive(pm: PMSession, d: dict, allowed: List[str], plan: Plan,
 
 
 def _apply_replan(pm: PMSession, d: dict, plan: Plan, ledger: Ledger, cfg: Config,
-                  step: Optional[Step] = None) -> Plan:
+                  step: Optional[Step] = None, require_pending: bool = False) -> Plan:
     used = ledger.bump_replans()
     if used > cfg.max_replans:
         path = ledger.write_escalation("replan_cap_exhausted", plan,
@@ -318,26 +348,42 @@ def _apply_replan(pm: PMSession, d: dict, plan: Plan, ledger: Ledger, cfg: Confi
         raise RunAborted(1, "replan cap exhausted")
     ledger.reset_to_head("replan")
     for attempt in (1, 2):
-        try:
-            new_plan = apply_mutations(plan, d.get("plan_mutations") or [])
-            ledger.save_plan(new_plan)
-            ledger.log({"event": "replanned", "replans_used": used})
-            print(f"   ↻ plan updated by PM (replan {used}/{cfg.max_replans})\n")
-            return new_plan
-        except PlanValidationError as e:
-            if attempt == 1:
-                d = pm.corrective_turn(e.problems, ["replan", "abort"], plan, step)
-                if d.get("verdict") == "abort":
-                    _abort(ledger, plan, d, step.id if step else "")
-            else:
-                ledger.write_escalation("invalid_replan", plan, detail="; ".join(e.problems))
-                print("PM could not produce valid plan mutations:\n  - " + "\n  - ".join(e.problems))
-                raise RunAborted(1, "invalid replan")
+        problems: List[str] = []
+        if d.get("verdict") != "replan" or not d.get("plan_mutations"):
+            problems = ["replan requires non-empty plan_mutations"]
+        else:
+            try:
+                new_plan = apply_mutations(plan, d.get("plan_mutations") or [])
+                if require_pending and new_plan.next_pending() is None:
+                    problems = ["a replan at finalize must add or reopen at least one step "
+                                "to work on — these mutations leave nothing pending"]
+                else:
+                    ledger.save_plan(new_plan)
+                    ledger.log({"event": "replanned", "replans_used": used})
+                    print(f"   ↻ plan updated by PM (replan {used}/{cfg.max_replans})\n")
+                    return new_plan
+            except PlanValidationError as e:
+                problems = e.problems
+        if attempt == 1:
+            d = pm.corrective_turn(problems, ["replan", "abort"], plan, step)
+            if d.get("verdict") == "abort":
+                _abort(ledger, plan, d, step.id if step else "")
+        else:
+            ledger.write_escalation("invalid_replan", plan, detail="; ".join(problems))
+            print("PM could not produce valid plan mutations:\n  - " + "\n  - ".join(problems))
+            raise RunAborted(1, "invalid replan")
 
 
 def _checkpoint(pm: PMSession, plan: Plan, ledger: Ledger) -> None:
     print("   … PM context checkpoint (fresh PM session next turn)")
-    ckpt = pm.checkpoint_turn(plan)
+    try:
+        ckpt = pm.checkpoint_turn(plan)
+    except PMTurnError:
+        # The live session is gone; a checkpoint from a blank session would fabricate.
+        # Keep the existing checkpoint and current session rather than laundering memory.
+        ledger.log({"event": "checkpoint_skipped_degraded"})
+        print("   (checkpoint skipped — session unavailable; keeping prior context)")
+        return
     ledger.save_checkpoint(ckpt)
     pm.reincarnate()
 

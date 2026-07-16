@@ -37,6 +37,7 @@ def run_claude(
     add_dirs: Optional[Sequence[Path]] = None,
     max_turns: Optional[int] = None,
     timeout_s: int = 3600,
+    timeout_cost_usd: float = 0.0,
 ) -> ClaudeResult:
     cmd = ["claude", "-p", prompt, "--output-format", "json"]
     if model:
@@ -59,16 +60,30 @@ def run_claude(
         cmd += ["--add-dir", str(d)]
 
     try:
-        proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout_s)
+        proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True,
+                              errors="replace", timeout=timeout_s)
     except subprocess.TimeoutExpired:
-        # A hung call is a retryable failure, not a run-ending crash.
+        # A hung call is a retryable failure, not a run-ending crash. The process was
+        # killed but the API work was billed; charge an estimate so the budget rail
+        # is not blind here (raw.error='timeout' lets the caller branch its retry).
         return ClaudeResult(
             ok=False,
             text=f"[claude CLI timed out after {timeout_s}s]",
             session_id=None,
-            cost_usd=0.0,
+            cost_usd=float(timeout_cost_usd or 0.0),
             structured=None,
             raw={"error": "timeout", "timeout_s": timeout_s},
+        )
+    except OSError as exc:
+        # e.g. E2BIG when a huge prompt/schema overflows the argv limit — a retryable
+        # failure, not a crash that escapes the exit-code contract.
+        return ClaudeResult(
+            ok=False,
+            text=f"[claude CLI could not be launched: {exc}]",
+            session_id=None,
+            cost_usd=0.0,
+            structured=None,
+            raw={"error": "oserror", "detail": str(exc)},
         )
 
     data = _parse_json(proc.stdout.strip())
@@ -83,8 +98,12 @@ def run_claude(
             raw={"returncode": proc.returncode, "stderr": proc.stderr, "stdout": proc.stdout},
         )
 
+    # Real CLI error subtypes are error_max_turns / error_during_execution — never a
+    # bare "error". Treat any "error*" subtype as an error so a max-turns-truncated run
+    # isn't mistaken for a clean completion.
     subtype = data.get("subtype")
-    is_error = (proc.returncode != 0) or (subtype == "error") or (data.get("is_error") is True)
+    subtype_error = bool(subtype) and str(subtype).startswith("error")
+    is_error = (proc.returncode != 0) or subtype_error or (data.get("is_error") is True)
     text = data.get("result") or data.get("content") or ""
     if not isinstance(text, str):
         text = json.dumps(text)

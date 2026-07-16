@@ -96,14 +96,20 @@ class TestLedger(unittest.TestCase):
         tracked = git_out(self.repo, "ls-files")
         self.assertNotIn(".agentic", tracked)
 
-    def test_reset_to_head_saves_discarded_diff(self):
+    def test_reset_to_head_saves_tracked_diff_and_untracked_files(self):
         led = Ledger.load_or_start(self.cfg)
-        (self.repo / "app.txt").write_text("v2 modified\n")
+        (self.repo / "app.txt").write_text("v2 modified\n")     # tracked edit
+        (self.repo / "new_module.py").write_text("print('new')\n")  # untracked new file
         led.reset_to_head("test")
         self.assertEqual((self.repo / "app.txt").read_text(), "v1\n")
-        dumped = list((self.cfg.state_dir / "discarded").glob("*.diff"))
+        self.assertFalse((self.repo / "new_module.py").exists())  # clean -fd removed it
+        dumped = list((self.cfg.state_dir / "discarded").glob("**/tracked.diff"))
         self.assertEqual(len(dumped), 1)
         self.assertIn("v2 modified", dumped[0].read_text())
+        # the untracked file's content was preserved forensically
+        saved = list((self.cfg.state_dir / "discarded").glob("**/new_module.py"))
+        self.assertEqual(len(saved), 1)
+        self.assertIn("print('new')", saved[0].read_text())
 
     def test_diff_against_head_includes_untracked_and_caps(self):
         led = Ledger.load_or_start(self.cfg)
@@ -122,6 +128,83 @@ class TestLedger(unittest.TestCase):
             self.assertTrue((wt / "app.txt").exists())        # committed content present
             self.assertFalse((wt / "dirty.txt").exists())     # uncommitted absent
         self.assertFalse(wt.exists() and any(wt.iterdir()))   # cleaned up
+
+    def test_dirty_tree_snapshotted_at_start(self):
+        # a repo with pre-existing uncommitted work
+        r = make_repo()
+        subprocess.run(["git", "init", "-q"], cwd=str(r))
+        subprocess.run(["git", "add", "-A"], cwd=str(r))
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t",
+                        "commit", "-qm", "base"], cwd=str(r))
+        (r / "app.txt").write_text("user's uncommitted edit\n")
+        (r / "wip.txt").write_text("user's work in progress\n")
+        led = Ledger.load_or_start(make_cfg(r))
+        # HEAD is now clean; the user's work is preserved in a snapshot commit
+        self.assertEqual(subprocess.run(["git", "status", "--porcelain"], cwd=str(r),
+                                        capture_output=True, text=True).stdout.strip(), "")
+        self.assertIn("pre-run snapshot", git_out(r, "log", "--oneline"))
+        self.assertIn("uncommitted edit", (r / "app.txt").read_text())
+
+    def test_adopt_head_if_matches_crash_window(self):
+        led = Ledger.load_or_start(self.cfg)
+        step = Step(id="1", goal="g", acceptance_criteria=["a"], verify=["true"])
+        step.base_sha = led.head_sha()
+        led.save_plan(Plan(steps=[step]))
+        # simulate the crash window: work got committed but the step wasn't marked done
+        (self.repo / "shipped.txt").write_text("done\n")
+        led.commit_step(step, "step 1: shipped")
+        committed = step.commit_sha
+        step.commit_sha = ""  # as if save_plan never ran
+        led.save_plan(Plan(steps=[step]))
+        # on the no-op re-accept, adoption recovers the commit instead of forcing descope
+        adopted = led.adopt_head_if_matches(step)
+        self.assertEqual(adopted, committed)
+
+    def test_detached_head_records_sha(self):
+        r = make_repo()
+        subprocess.run(["git", "init", "-q"], cwd=str(r))
+        subprocess.run(["git", "add", "-A"], cwd=str(r))
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t",
+                        "commit", "-qm", "base"], cwd=str(r))
+        sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(r),
+                             capture_output=True, text=True).stdout.strip()
+        subprocess.run(["git", "checkout", "-q", "--detach", sha], cwd=str(r))
+        led = Ledger.load_or_start(make_cfg(r, use_run_branch=False))
+        self.assertEqual(led.state["branch"], sha)  # SHA, not the literal "HEAD"
+
+    def test_resume_refuses_incompatible_and_finished_state(self):
+        led = Ledger.load_or_start(self.cfg)
+        led.start("t")
+        # wrong schema version
+        bad = json.loads(led.state_path.read_text())
+        bad["schema_version"] = 999
+        led.state_path.write_text(json.dumps(bad))
+        with self.assertRaises(StateConflict):
+            Ledger.load_or_start(self.cfg, resume=True)
+        # finished run is not resumable
+        good = json.loads(json.dumps(led.state)); good["finished"] = True
+        led.state_path.write_text(json.dumps(good))
+        with self.assertRaises(StateConflict):
+            Ledger.load_or_start(self.cfg, resume=True)
+
+    def test_diff_skips_binary_and_huge_untracked(self):
+        led = Ledger.load_or_start(self.cfg)
+        (self.repo / "blob.bin").write_bytes(b"\x00\x01\x02" * 100)
+        d = led.diff_against_head(cap=100000)
+        self.assertIn("blob.bin", d["changed_files"])
+        self.assertIn("not shown", d["diff"])  # binary flagged, not embedded
+
+    def test_git_hooks_disabled(self):
+        led = Ledger.load_or_start(self.cfg)
+        hooks = self.repo / ".git" / "hooks"
+        hooks.mkdir(exist_ok=True)
+        marker = self.repo / "HOOK_FIRED"
+        hook = hooks / "post-checkout"
+        hook.write_text(f"#!/bin/sh\ntouch {marker}\n")
+        hook.chmod(0o755)
+        with led.pristine_worktree() as wt:
+            self.assertTrue((wt / "app.txt").exists())
+        self.assertFalse(marker.exists())  # dev-planted hook never fired
 
     def test_atomic_save_and_plan_roundtrip(self):
         led = Ledger.load_or_start(self.cfg)

@@ -11,8 +11,13 @@ each turn what happens next. Respond ONLY with the requested directive JSON.
 - Verification commands are run by the ORCHESTRATOR, never by you or the developer's
   self-report. A step without gate-transcript evidence cannot be accepted; when gates are
   red, `accept` is not even in your schema.
-- `accept` requires per-criterion evidence: exact quotes from the handover packet (diff or
-  gate transcript). Fabricated quotes are detected and refused.
+- `accept` requires, for EACH acceptance criterion, an exact verbatim quote (≥12 chars)
+  taken from the handover's proof sections — the diff or the gate transcript. Quotes are
+  checked by substring: paraphrases, empty/short strings, boilerplate like "ALL GATES
+  PASSED", and re-using one quote for several criteria are all detected and refused. Each
+  criterion's `criterion` field must name the actual acceptance criterion it addresses.
+- When the handover raises INTEGRITY FLAGS, accepting additionally requires an
+  `integrity_ack` that names each flag and cites the specific diff evidence that clears it.
 - `task_complete` triggers final verification in a PRISTINE fresh checkout plus a replay of
   every accepted step's verify commands. Declare it only when the brief's definition of
   done truly holds.

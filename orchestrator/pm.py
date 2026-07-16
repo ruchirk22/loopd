@@ -74,6 +74,9 @@ def directive_schema(verdicts: List[str]) -> dict:
         props["dev_session"] = {"type": "string", "enum": ["fresh", "resume"]}
     if "accept" in verdicts:
         props["commit_message"] = {"type": "string"}
+        props["integrity_ack"] = {"type": "string",
+                                  "description": "Required to accept when integrity flags are raised: "
+                                                 "name each flag and cite the diff evidence that clears it."}
         props["criteria_evidence"] = {
             "type": "array",
             "items": {
@@ -99,30 +102,83 @@ def _norm(s: str) -> str:
     return " ".join(s.split())
 
 
+# Boilerplate that is present in EVERY green handover — quoting it proves nothing.
+_BANNED_EVIDENCE = {"all gates passed", "gates failed", "gate verdict", "ground truth",
+                    "ok", "done", "pass", "passed", "tests pass", "it works",
+                    "looks good", "lgtm", "correct", "verified", "n/a"}
+_MIN_QUOTE = 12
+# Only these packet sections are real proof — not the gate-verdict banner or headings.
+_EVIDENCE_SECTIONS = ("Developer's structured summary", "Diff vs last accepted commit",
+                      "Gate transcript")
+
+
+def _evidence_haystack(handover_text: str) -> str:
+    """The parts of the packet that constitute proof: dev summary, diff, gate transcript
+    — excluding the banner/headers a PM could quote without reading anything."""
+    hay = handover_text
+    for marker in _EVIDENCE_SECTIONS:
+        idx = handover_text.find(marker)
+        if idx != -1:
+            return _norm(handover_text[idx:])
+    return _norm(hay)
+
+
+def _match_criterion(quoted: str, criteria: List[str]) -> Optional[int]:
+    q = _norm(quoted).lower()
+    for i, c in enumerate(criteria):
+        if q and (q in _norm(c).lower() or _norm(c).lower() in q):
+            return i
+    return None
+
+
 def verify_evidence(directive: dict, step: Step, handover_text: str) -> List[str]:
-    """Accept requires per-criterion evidence quoted from the handover packet.
-    Fabricated quotes (not found in the packet) are validation failures."""
+    """Accept requires, per acceptance criterion, an exact quote from the PROOF sections
+    of the handover packet. Empty/short/boilerplate quotes, fabricated quotes, duplicate
+    quotes, and unmatched criteria are all refused — this is the anti-rubber-stamp rail."""
     problems = []
+    criteria = [c for c in step.acceptance_criteria if c.strip()]
     evidence = directive.get("criteria_evidence") or []
-    if len(evidence) < len(step.acceptance_criteria):
-        problems.append(
-            f"accept requires evidence for every acceptance criterion "
-            f"({len(step.acceptance_criteria)} criteria, {len(evidence)} evidence entries)")
-    hay = _norm(handover_text)
+    hay = _evidence_haystack(handover_text)
+    covered = set()
+    seen_quotes = set()
+
     for i, e in enumerate(evidence):
-        if not e.get("satisfied"):
-            problems.append(f"criterion {i + 1} marked unsatisfied — you cannot accept; reject or replan instead")
+        label = f"evidence entry {i + 1}"
+        if not e.get("satisfied", False):
+            problems.append(f"{label}: criterion marked unsatisfied — you cannot accept; reject or replan instead")
             continue
         quote = _norm(str(e.get("evidence", "")))
-        if len(quote) >= 12 and quote not in hay:
-            problems.append(
-                f"evidence for criterion {i + 1} is not an exact quote from the handover packet: "
-                f"{quote[:120]!r}")
+        if not quote:
+            problems.append(f"{label}: empty evidence — quote the exact text from the diff or gate transcript that proves it")
+            continue
+        if quote.lower() in _BANNED_EVIDENCE:
+            problems.append(f"{label}: {quote!r} is boilerplate, not proof — quote specific diff/output text")
+            continue
+        if len(quote) < _MIN_QUOTE:
+            problems.append(f"{label}: evidence {quote!r} is too short to verify — quote at least {_MIN_QUOTE} characters verbatim from the packet")
+            continue
+        if quote in seen_quotes:
+            problems.append(f"{label}: the same quote is reused for multiple criteria — cite distinct evidence per criterion")
+            continue
+        seen_quotes.add(quote)
+        if quote not in hay:
+            problems.append(f"{label}: not an exact quote from the handover's proof sections: {quote[:120]!r}")
+            continue
+        idx = _match_criterion(str(e.get("criterion", "")), criteria)
+        if idx is None:
+            problems.append(f"{label}: criterion {str(e.get('criterion',''))[:80]!r} does not match any of the step's acceptance criteria")
+            continue
+        covered.add(idx)
+
+    missing = [criteria[i] for i in range(len(criteria)) if i not in covered]
+    if missing:
+        problems.append("no verified evidence for acceptance criteria: "
+                        + "; ".join(m[:80] for m in missing))
     return problems
 
 
 def validate_directive(directive: dict, allowed: List[str], step: Optional[Step],
-                       handover_text: str = "") -> List[str]:
+                       handover_text: str = "", require_integrity_ack: bool = False) -> List[str]:
     problems = []
     verdict = directive.get("verdict", "")
     if verdict not in allowed:
@@ -135,6 +191,9 @@ def validate_directive(directive: dict, allowed: List[str], step: Optional[Step]
     if verdict == "accept":
         if not str(directive.get("commit_message", "")).strip():
             problems.append("accept requires a commit_message")
+        if require_integrity_ack and len(str(directive.get("integrity_ack", "")).strip()) < 40:
+            problems.append("integrity flags were raised: accept requires a substantive integrity_ack "
+                            "naming each flag and citing the diff evidence that clears it")
         if step is not None:
             problems += verify_evidence(directive, step, handover_text)
     if verdict in ("plan", "replan") and not directive.get("plan_mutations"):
@@ -181,18 +240,26 @@ class PMSession:
         return "\n".join(parts)
 
     def turn(self, payload: str, schema: dict, label: str,
-             plan: Optional[Plan] = None) -> dict:
-        """One PM turn. Retry ladder: resume -> resume once more -> reincarnate fresh
-        (seeded from brief + checkpoint + ledger digest). Raises PMTurnError after that."""
-        strategies = ["resume", "resume", "fresh"] if self.session_id else ["fresh", "fresh"]
+             plan: Optional[Plan] = None, degradable: bool = True) -> dict:
+        """One PM turn. Retry ladder adapts to the failure: a stale/invalid session goes
+        straight to a fresh reincarnation (no pointless second resume); a timeout retries
+        the same session once (the CLI may have persisted a partial answer) before
+        reincarnating. `degradable=False` (checkpoints) forbids the fresh fallback, so a
+        context-dependent turn never fabricates memory from a blank session.
+
+        Raises PMTurnError after the ladder is exhausted."""
         last_err = ""
-        for strategy in strategies:
-            resume = self.session_id if strategy == "resume" else None
-            prompt = payload if resume else self._seed_text(plan) + "\n\n---\n\n" + payload
-            if resume is None and self.session_id is not None:
-                self.ledger.log({"event": "pm_degraded_resume", "label": label})
-                self.session_id = None
-                self.ledger.set_pm_session(None)
+        attempts, max_attempts = 0, 4
+        while attempts < max_attempts:
+            attempts += 1
+            resume = self.session_id
+            if resume is None:
+                if not degradable and self.ledger.state.get("pm_session_id") is not None:
+                    # Non-degradable turn on a lost session: refuse rather than fabricate.
+                    raise PMTurnError(f"PM turn {label!r} needs live session context that is unavailable")
+                prompt = self._seed_text(plan) + "\n\n---\n\n" + payload
+            else:
+                prompt = payload
             res = run_claude(
                 prompt,
                 cwd=self.cfg.repo,
@@ -204,19 +271,33 @@ class PMSession:
                 json_schema=schema,
                 max_turns=self.cfg.max_turns_per_call,
                 timeout_s=self.cfg.call_timeout_s,
+                timeout_cost_usd=self.cfg.timeout_cost_usd,
             )
+            # Persist the session id BEFORE charging, so a budget stop still resumes the
+            # right session and doesn't re-pay for this turn.
+            if res.session_id:
+                self.session_id = res.session_id
+                self.ledger.set_pm_session(res.session_id)
             self.ledger.spend(res.cost_usd)
             if res.ok and res.structured is not None:
-                if res.session_id:
-                    self.session_id = res.session_id
-                    self.ledger.set_pm_session(res.session_id)
                 self.ledger.log({"event": "pm_turn", "label": label,
-                                 "verdict": res.structured.get("verdict"),
-                                 "cost": res.cost_usd})
+                                 "verdict": res.structured.get("verdict"), "cost": res.cost_usd})
                 return res.structured
+
             last_err = res.text[:1500]
-            self.ledger.log({"event": "pm_turn_failed", "label": label, "error": last_err[:500]})
-        raise PMTurnError(f"PM turn {label!r} failed after retries: {last_err}")
+            is_timeout = res.raw.get("error") == "timeout"
+            self.ledger.log({"event": "pm_turn_failed", "label": label,
+                             "timeout": is_timeout, "error": last_err[:500]})
+            if resume is not None and not is_timeout:
+                # A resumed session failed fast (stale/invalid) — reincarnate now.
+                if not degradable:
+                    raise PMTurnError(f"PM turn {label!r} lost its session and cannot degrade: {last_err}")
+                self.ledger.log({"event": "pm_degraded_resume", "label": label})
+                self.session_id = None
+                self.ledger.set_pm_session(None)
+            elif resume is not None and is_timeout:
+                pass  # retry the SAME session once; the CLI may have persisted a partial turn
+        raise PMTurnError(f"PM turn {label!r} failed after {attempts} attempts: {last_err}")
 
     def reincarnate(self) -> None:
         """Drop the session; the next turn() seeds a fresh one from brief+checkpoint+digest."""
@@ -258,12 +339,17 @@ class PMSession:
             "Use `replan` if the plan needs changing first.\n\n" + self._rails(step))
         return self.turn(payload, directive_schema(["dispatch", "replan", "abort"]), f"dispatch:{step.id}", plan)
 
-    def review_turn(self, step: Step, handover_text: str, allowed: List[str], plan: Plan) -> dict:
+    def review_turn(self, step: Step, handover_text: str, allowed: List[str], plan: Plan,
+                    high_risk: bool = False) -> dict:
+        accept_help = ("accept — criteria met; provide commit_message and, per acceptance criterion, "
+                       "criteria_evidence with an EXACT verbatim quote (>=12 chars) from the diff or gate "
+                       "transcript — not the gate banner, not paraphrase; each criterion needs its own quote")
+        if high_risk:
+            accept_help += "; integrity flags are raised, so accept also requires an integrity_ack"
         menu = {
-            "accept": "accept — criteria met; provide commit_message and per-criterion criteria_evidence "
-                      "(exact quotes from the packet below)",
+            "accept": accept_help,
             "reject": "reject — gates passed but the work does not meet the criteria; next_prompt is your "
-                      "feedback to the SAME developer session",
+                      "feedback (dev_session defaults to the same developer; set fresh to start over)",
             "replan": "replan — this step (or the plan) is wrong; provide plan_mutations",
             "descope": "descope — skip this step; reasoning must state the impact of skipping it",
             "abort": "abort — the run cannot continue; reasoning must say why",
@@ -307,7 +393,9 @@ class PMSession:
             "ONLY your summary, the original brief, and the ledger digest: mission_summary, "
             "key_decisions (with the WHY), open_risks, remaining_plan_note, advice_to_successor "
             "(dead ends, gotchas, what to watch).")
-        return self.turn(payload, CHECKPOINT_SCHEMA, "checkpoint", plan)
+        # Non-degradable: a checkpoint from a blank fresh session would launder away the
+        # real run memory it exists to preserve.
+        return self.turn(payload, CHECKPOINT_SCHEMA, "checkpoint", plan, degradable=False)
 
     def corrective_turn(self, problems: List[str], allowed: List[str], plan: Plan,
                         step: Optional[Step] = None) -> dict:

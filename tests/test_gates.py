@@ -37,6 +37,21 @@ class TestGates(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("TIMEOUT after 1s", log)
 
+    def test_timeout_prefix_not_applied_to_shell_var(self):
+        # "timeout=30; ... $timeout ..." is a legit shell assignment, not our prefix
+        ok, log = run_gates(["timeout=1; test -n \"$timeout\""], self.tmp)
+        self.assertTrue(ok)
+
+    def test_timeout_kills_backgrounded_grandchild(self):
+        import time as _t
+        marker = self.tmp / "alive.txt"
+        # background a process that would outlive a naive child-only kill
+        cmd = f"(sleep 30; touch {marker}) & echo started; wait"
+        ok, log = run_gates([f"timeout=1;{cmd}"], self.tmp)
+        self.assertFalse(ok)
+        _t.sleep(2)
+        self.assertFalse(marker.exists())  # grandchild was group-killed
+
     def test_setup_failure_fails_gate_and_teardown_always_runs(self):
         ok, log = run_gates(["touch check.txt"], self.tmp,
                             setup=["false"], teardown=["touch torn.txt"])

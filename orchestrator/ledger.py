@@ -20,6 +20,9 @@ from typing import Iterator, List, Optional
 from .config import Config
 from .plan import Plan, Step, DONE, SKIPPED
 
+# Bump when the state.json shape changes incompatibly; older files are refused on resume.
+SCHEMA_VERSION = 2
+
 
 class BudgetExceeded(RuntimeError):
     pass
@@ -37,8 +40,23 @@ class StateConflict(RuntimeError):
     """state.json from a previous run exists; caller must choose --resume-run or --fresh."""
 
 
+# Injected into EVERY git call: dev-planted hooks must never fire under orchestrator
+# privileges (e.g. during `worktree add`), and untracked filenames must come back raw
+# (not C-quoted) so non-ASCII names aren't dropped from the diff.
+_GIT_SAFE = ["-c", "core.hooksPath=/dev/null", "-c", "core.quotePath=false"]
+
+
+def _looks_binary(path: Path) -> bool:
+    try:
+        with path.open("rb") as f:
+            return b"\0" in f.read(8192)
+    except OSError:
+        return True
+
+
 def _git(args: List[str], cwd: Path, check: bool = True) -> subprocess.CompletedProcess:
-    p = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True)
+    p = subprocess.run(["git", *_GIT_SAFE, *args], cwd=str(cwd),
+                       capture_output=True, text=True, errors="replace")
     if check and p.returncode != 0:
         raise GitError(f"git {' '.join(args)} failed (exit {p.returncode}): "
                        f"{(p.stderr or p.stdout).strip()[:800]}")
@@ -60,14 +78,17 @@ class Ledger:
         led = cls(cfg)
         if led.state_path.exists():
             if resume:
-                led.state = json.loads(led.state_path.read_text())
+                led.state = led._load_valid_state()
                 led._ensure_git(resume=True)
                 led.log({"event": "run_resumed", "total_cost_usd": led.state.get("total_cost_usd", 0)})
                 return led
             if not fresh:
+                try:
+                    task = json.loads(led.state_path.read_text()).get("task", "")
+                except (json.JSONDecodeError, OSError):
+                    task = "(unreadable)"
                 raise StateConflict(
-                    f"{led.state_path} exists from a previous run "
-                    f"({json.loads(led.state_path.read_text()).get('task', '')!r:.80}). "
+                    f"{led.state_path} exists from a previous run ({task!r:.80}). "
                     "Re-run with --resume-run to continue it, or --fresh to archive it and start over.")
             stamp = time.strftime("%Y%m%d-%H%M%S")
             led.state_path.rename(led.state_path.with_name(f"state.{stamp}.json"))
@@ -78,11 +99,12 @@ class Ledger:
 
         led._ensure_git(resume=False)
         led.state = {
+            "schema_version": SCHEMA_VERSION,
             "task": "",
             "started": time.time(),
             "total_cost_usd": 0.0,
             "pm_session_id": None,
-            "branch": led._current_branch(),
+            "branch": led._current_ref(),
             "plan": None,
             "checkpoint": None,
             "replans_used": 0,
@@ -92,6 +114,27 @@ class Ledger:
         }
         led._save()
         return led
+
+    def _load_valid_state(self) -> dict:
+        try:
+            state = json.loads(self.state_path.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            raise StateConflict(f"{self.state_path} is unreadable/corrupt ({exc}); "
+                                "start over with --fresh.")
+        if not isinstance(state, dict) or state.get("schema_version") != SCHEMA_VERSION:
+            raise StateConflict(
+                f"{self.state_path} was written by an incompatible version "
+                f"(schema_version={state.get('schema_version') if isinstance(state, dict) else '?'}, "
+                f"expected {SCHEMA_VERSION}); start over with --fresh.")
+        required = {"task", "total_cost_usd", "branch", "finished"}
+        missing = [k for k in required if k not in state]
+        if missing:
+            raise StateConflict(f"{self.state_path} is missing keys {missing}; start over with --fresh.")
+        if state.get("finished"):
+            raise StateConflict(f"the run in {self.state_path} already finished; nothing to resume "
+                                "(use --fresh for a new run).")
+        state.setdefault("total_cost_usd", 0.0)
+        return state
 
     def start(self, task: str) -> None:
         self.state["task"] = task
@@ -118,18 +161,30 @@ class Ledger:
             _git(["add", "-A"], self.repo)
             _git(["commit", "-m", "agentic-loop: baseline", "--allow-empty"], self.repo)
         if resume:
-            branch = self.state.get("branch") if self.state else None
-            if branch and self._current_branch() != branch:
-                _git(["checkout", branch], self.repo)
-        elif self.cfg.use_run_branch:
+            ref = self.state.get("branch") if self.state else None
+            if ref and self._current_ref() != ref:
+                _git(["checkout", ref], self.repo)
+            return
+        if self.cfg.use_run_branch:
             base = f"agentic/run-{time.strftime('%Y%m%d-%H%M%S')}"
             branch, n = base, 2
             while _git(["rev-parse", "--verify", branch], self.repo, check=False).returncode == 0:
                 branch, n = f"{base}-{n}", n + 1
             _git(["checkout", "-b", branch], self.repo)
+        # Isolate any pre-existing uncommitted work so step commits/resets never touch
+        # it: snapshot it as its own commit on the run branch, leaving a clean HEAD.
+        if _git(["status", "--porcelain"], self.repo, check=False).stdout.strip():
+            _git(["add", "-A"], self.repo)
+            _git(["commit", "-m", "agentic-loop: pre-run snapshot of your uncommitted work",
+                  "--allow-empty"], self.repo)
+            self.log({"event": "pre_run_snapshot"})
 
-    def _current_branch(self) -> str:
-        return _git(["rev-parse", "--abbrev-ref", "HEAD"], self.repo).stdout.strip()
+    def _current_ref(self) -> str:
+        """Branch name, or the commit SHA when HEAD is detached (so resume can restore
+        the true position — 'HEAD' as a branch name is a checkout no-op)."""
+        if _git(["symbolic-ref", "-q", "HEAD"], self.repo, check=False).returncode == 0:
+            return _git(["rev-parse", "--abbrev-ref", "HEAD"], self.repo).stdout.strip()
+        return _git(["rev-parse", "HEAD"], self.repo).stdout.strip()
 
     def commit_step(self, step: Step, message: str) -> str:
         _git(["add", "-A"], self.repo)
@@ -142,38 +197,90 @@ class Ledger:
         self.log({"event": "step_committed", "step": step.id, "sha": sha, "message": msg[:200]})
         return sha
 
-    def reset_to_head(self, reason: str) -> None:
-        """Discard uncommitted work (e.g. an abandoned step before a replan), keeping
-        a forensic copy of what was thrown away. Ignored files (.agentic/) survive."""
-        diff = _git(["diff", "HEAD"], self.repo, check=False).stdout
-        if diff.strip():
-            dump = self.cfg.state_dir / "discarded"
-            dump.mkdir(exist_ok=True)
-            path = dump / f"{time.strftime('%Y%m%d-%H%M%S')}.diff"
-            path.write_text(diff)
-            self.log({"event": "work_discarded", "reason": reason, "diff_file": str(path)})
-        _git(["reset", "--hard", "HEAD"], self.repo)
-        _git(["clean", "-fd"], self.repo)
+    def head_sha(self) -> str:
+        return _git(["rev-parse", "HEAD"], self.repo, check=False).stdout.strip()
 
-    def diff_against_head(self, cap: int) -> dict:
-        stat = _git(["diff", "HEAD", "--stat"], self.repo, check=False).stdout
+    def adopt_head_if_matches(self, step: Step) -> Optional[str]:
+        """Crash-window recovery: if this step produced no new diff (so accept hit
+        NoChangesError) but HEAD has advanced past where the step started and that commit
+        isn't already claimed by another step, the step's work was committed just before a
+        crash — adopt that commit instead of forcing a futile reject/descope."""
+        sha = self.head_sha()
+        if not sha or sha == step.base_sha:
+            return None
+        plan = self.load_plan()
+        claimed = {s.commit_sha for s in plan.steps} if plan else set()
+        if sha in claimed:
+            return None
+        step.commit_sha = sha
+        self.log({"event": "step_adopted_head", "step": step.id, "sha": sha})
+        return sha
+
+    def reset_to_head(self, reason: str) -> None:
+        """Discard uncommitted work (e.g. an abandoned step before a replan), keeping a
+        forensic copy of BOTH tracked edits (as a diff) and untracked files (copied
+        verbatim) — `git clean -fd` deletes untracked files permanently. Ignored files
+        (.agentic/, node_modules, ...) survive the clean."""
+        dump = self.cfg.state_dir / "discarded" / time.strftime("%Y%m%d-%H%M%S")
+        diff = _git(["diff", "HEAD"], self.repo, check=False).stdout
+        untracked = self._untracked_files()
+        if diff.strip() or untracked:
+            dump.mkdir(parents=True, exist_ok=True)
+            if diff.strip():
+                (dump / "tracked.diff").write_text(diff, errors="replace")
+            for rel in untracked:
+                src = self.repo / rel
+                if src.is_file():
+                    target = dump / rel
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        target.write_bytes(src.read_bytes())
+                    except OSError:
+                        pass
+            self.log({"event": "work_discarded", "reason": reason, "dir": str(dump),
+                      "untracked_saved": len(untracked)})
+        _git(["reset", "--hard", "HEAD"], self.repo)
+        _git(["clean", "-fd"], self.repo)  # -fd (not -x): keeps ignored files incl. .agentic/
+
+    def _untracked_files(self) -> List[str]:
+        out = _git(["ls-files", "--others", "--exclude-standard", "-z"], self.repo, check=False).stdout
+        return [p for p in out.split("\0") if p.strip()]
+
+    def diff_against_head(self, cap: int, stat_line_cap: int = 200) -> dict:
+        stat = _git(["diff", "HEAD", "--stat"], self.repo, check=False).stdout.strip()
+        stat_lines = stat.splitlines()
+        if len(stat_lines) > stat_line_cap:  # keep the prompt argv well under ARG_MAX
+            stat = "\n".join(stat_lines[:stat_line_cap] + [f"[... {len(stat_lines) - stat_line_cap} more lines ...]"])
         full = _git(["diff", "HEAD"], self.repo, check=False).stdout
-        untracked = _git(["ls-files", "--others", "--exclude-standard"], self.repo, check=False).stdout
-        changed = _git(["diff", "HEAD", "--name-only"], self.repo, check=False).stdout.splitlines()
-        changed += [u for u in untracked.splitlines() if u.strip()]
-        for path in untracked.splitlines():
+        untracked = self._untracked_files()
+        changed = [c for c in _git(["diff", "HEAD", "--name-only"], self.repo,
+                                   check=False).stdout.splitlines() if c.strip()] + untracked
+        # Append untracked file bodies up to the remaining byte budget; never slurp a
+        # whole tree (node_modules etc.) into memory, and flag binaries instead of
+        # embedding mojibake.
+        skipped = []
+        for path in untracked:
+            remaining = cap - len(full)
+            if remaining <= 0:
+                skipped.append(path)
+                continue
             p = self.repo / path
-            if p.is_file():
-                try:
-                    body = p.read_text(errors="replace")
-                except OSError:
+            if not p.is_file():
+                continue
+            try:
+                if p.stat().st_size > max(remaining, 65536) or _looks_binary(p):
+                    full += f"\n--- /dev/null\n+++ b/{path} (untracked, {p.stat().st_size} bytes — not shown)\n"
                     continue
-                full += f"\n--- /dev/null\n+++ b/{path} (untracked)\n{body}"
+                body = p.read_text(errors="replace")[:remaining]
+            except OSError:
+                continue
+            full += f"\n--- /dev/null\n+++ b/{path} (untracked)\n{body}"
         truncated = len(full) > cap
+        note = f"\n[... {len(skipped)} more untracked file(s) omitted ...]" if skipped else ""
         return {
-            "stat": stat.strip(),
-            "diff": full[:cap] + ("\n[... diff truncated ...]" if truncated else ""),
-            "changed_files": [c.strip() for c in changed if c.strip()],
+            "stat": stat,
+            "diff": full[:cap] + ("\n[... diff truncated ...]" if truncated else "") + note,
+            "changed_files": changed,
             "empty": not full.strip(),
         }
 

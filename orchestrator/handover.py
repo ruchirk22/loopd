@@ -16,6 +16,12 @@ from .ledger import Ledger
 from .plan import Step
 
 _TEST_PATH = re.compile(r"(^|/)(tests?|__tests__|spec)(/|$)|(^|/|_)test[_.]|[_.](test|spec)\.", re.IGNORECASE)
+# Files that DEFINE what a gate command actually runs (npm test -> package.json, etc.).
+# Editing these games the gate without touching the verify string, so substring
+# matching misses it — flag them by name.
+_GATE_CONFIG = re.compile(r"(^|/)(package\.json|Makefile|GNUmakefile|pyproject\.toml|setup\.cfg|"
+                          r"pytest\.ini|tox\.ini|conftest\.py|\.mocharc[.\w]*|jest\.config[.\w]*|"
+                          r"\.pre-commit-config\.yaml|noxfile\.py|justfile)$", re.IGNORECASE)
 
 
 @dataclass
@@ -24,24 +30,34 @@ class Handover:
     bytes: int
     gates_passed: bool
     flags: List[str] = field(default_factory=list)
+    high_risk: bool = False
     dev_summary: str = ""
 
 
-def _integrity_flags(diff: dict, verify_cmds: List[str], tests_expected: bool) -> List[str]:
-    flags = []
+def _integrity_flags(diff: dict, verify_cmds: List[str], tests_expected: bool):
+    """Returns (flags, high_risk). high_risk flags force the PM to justify acceptance."""
+    flags, high_risk = [], False
     if diff["empty"]:
         flags.append("NO_OP_DIFF: the developer produced no changes relative to the last commit.")
     touched_tests = [f for f in diff["changed_files"] if _TEST_PATH.search(f)]
     if touched_tests and not tests_expected:
+        high_risk = True
         flags.append(f"TESTS_TOUCHED: test files changed ({', '.join(touched_tests[:8])}) — "
-                     "check they were strengthened, not weakened, to make gates pass.")
+                     "confirm they were strengthened, not weakened, to make gates pass.")
     verify_blob = "\n".join(verify_cmds)
     gate_targets = [f for f in diff["changed_files"]
                     if f and (f in verify_blob or (f.rsplit("/", 1)[-1] in verify_blob and len(f.rsplit("/", 1)[-1]) > 6))]
     if gate_targets:
+        high_risk = True
         flags.append(f"GATE_TARGETS_TOUCHED: files referenced by the verify commands were modified "
                      f"({', '.join(gate_targets[:8])}) — confirm the checks were not gamed.")
-    return flags
+    gate_config = [f for f in diff["changed_files"] if _GATE_CONFIG.search(f)]
+    if gate_config:
+        high_risk = True
+        flags.append(f"GATE_CONFIG_TOUCHED: files that DEFINE what the gate commands run were modified "
+                     f"({', '.join(gate_config[:8])}) — e.g. a weakened `npm test`/pytest config makes "
+                     "green gates meaningless. Inspect the actual check definition.")
+    return flags, high_risk
 
 
 def _dev_summary_text(res: Optional[ClaudeResult]) -> str:
@@ -71,7 +87,7 @@ def build_handover(
 ) -> Handover:
     diff = ledger.diff_against_head(cfg.handover_diff_cap)
     tests_expected = bool(re.search(r"\btests?\b", (step.goal + " " + step.details), re.IGNORECASE))
-    flags = _integrity_flags(diff, step.verify, tests_expected)
+    flags, high_risk = _integrity_flags(diff, step.verify, tests_expected)
     dev_summary = _dev_summary_text(dev_res)
 
     sections = [
@@ -105,7 +121,10 @@ def build_handover(
     if flags:
         sections += ["", "### INTEGRITY FLAGS — address each one explicitly in your reasoning"]
         sections += [f"- {f}" for f in flags]
+        if high_risk:
+            sections += ["", "To `accept` despite these flags you MUST provide an `integrity_ack` "
+                         "that names each flag and cites the specific diff evidence that clears it."]
 
     text = "\n".join(sections)
     return Handover(text=text, bytes=len(text.encode()), gates_passed=gates_passed,
-                    flags=flags, dev_summary=dev_summary)
+                    flags=flags, high_risk=high_risk, dev_summary=dev_summary)

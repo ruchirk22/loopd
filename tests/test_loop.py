@@ -59,16 +59,25 @@ def plan_directive(verify, criteria=None):
 DISPATCH = {"verdict": "dispatch", "reasoning": "go",
             "next_prompt": "Create hello.txt containing hello", "dev_session": "fresh"}
 
+DISPATCH_WORLD = {"verdict": "dispatch", "reasoning": "go",
+                  "next_prompt": "Create world.txt containing world", "dev_session": "fresh"}
+
+# verify commands reference hello.txt, which the dev creates -> GATE_TARGETS_TOUCHED
+# fires (high_risk), so a valid accept must also carry integrity_ack. Evidence quotes
+# the dev summary verbatim.
 ACCEPT = {"verdict": "accept", "reasoning": "diff shows the file; gates green",
           "commit_message": "step 1: hello",
+          "integrity_ack": "GATE_TARGETS_TOUCHED: hello.txt is the deliverable itself; the diff "
+                           "shows its real content, the check was not gamed.",
           "criteria_evidence": [{"criterion": "hello.txt exists", "satisfied": True,
-                                 "evidence": "ALL GATES PASSED"}]}
+                                 "evidence": "created hello.txt with the required content"}]}
 
 
 def dev_writes_hello(content="hello\n"):
     def responder(prompt, cwd, kw):
         (cwd / "hello.txt").write_text(content)
-        return ok_result({"summary": "created hello.txt", "files_changed": ["hello.txt"],
+        return ok_result({"summary": "created hello.txt with the required content",
+                          "files_changed": ["hello.txt"],
                           "commands_run": ["test -f hello.txt"], "concerns": []}, "dev-1")
     return responder
 
@@ -247,6 +256,51 @@ class TestBudgetStopAndResume(LoopTestBase):
         self.assertTrue(st["finished"])
         # spend carried over across the resume
         self.assertGreater(st["total_cost_usd"], 0.04)
+
+
+class TestFinalizeNoOpReplan(LoopTestBase):
+    def test_finalize_replan_without_pending_step_is_refused(self):
+        # PM tries to "replan" at finalize with a mutation that adds no pending work,
+        # then corrects to a real added step.
+        noop_replan = {"verdict": "replan", "reasoning": "tidy summary",
+                       "plan_mutations": [{"op": "set_summary", "summary": "cleaner"}]}
+        real_replan = {"verdict": "replan", "reasoning": "actually one more step",
+                       "plan_mutations": [{"op": "add", "step": {
+                           "id": "2", "goal": "make world.txt",
+                           "acceptance_criteria": ["world.txt exists"],
+                           "verify": ["test -f world.txt"]}}]}
+        world_accept = {"verdict": "accept", "reasoning": "created",
+                        "commit_message": "step 2",
+                        "integrity_ack": "GATE_TARGETS_TOUCHED: world.txt is the deliverable; diff is real.",
+                        "criteria_evidence": [{"criterion": "world.txt exists", "satisfied": True,
+                                               "evidence": "created world.txt as the deliverable"}]}
+
+        def dev_world(prompt, cwd, kw):
+            (cwd / "world.txt").write_text("world\n")
+            return ok_result({"summary": "created world.txt as the deliverable",
+                              "files_changed": ["world.txt"], "commands_run": ["test -f world.txt"],
+                              "concerns": []}, "dev-1")
+
+        self.patch_agents(
+            pm_script=[
+                (None, plan_directive(["test -f hello.txt"])),
+                (None, DISPATCH),
+                ("Review", ACCEPT),
+                ("All planned steps are accepted", noop_replan),   # finalize -> bad replan
+                ("REFUSED", real_replan),                          # corrective -> real step
+                ("Author the developer's instructions", DISPATCH_WORLD),
+                ("Review", world_accept),
+                (None, {"verdict": "task_complete", "reasoning": "both done",
+                        "final_verify": ["test -f hello.txt", "test -f world.txt"]}),
+            ],
+            dev_script=[(None, dev_writes_hello()), (None, dev_world)],
+        )
+        rc = loop.run(None, self.cfg)
+        self.assertEqual(rc, 0)
+        self.fake_pm.assert_exhausted()
+        st = self.state()
+        self.assertEqual(st["replans_used"], 1)
+        self.assertEqual([s["status"] for s in st["plan"]["steps"]], ["done", "done"])
 
 
 class TestReplanPath(LoopTestBase):
