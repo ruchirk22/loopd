@@ -107,6 +107,7 @@ class Ledger:
             "branch": led._current_ref(),
             "plan": None,
             "checkpoint": None,
+            "pending_commit": None,
             "replans_used": 0,
             "review_turns_since_ckpt": 0,
             "handover_bytes": 0,
@@ -165,19 +166,28 @@ class Ledger:
             if ref and self._current_ref() != ref:
                 _git(["checkout", ref], self.repo)
             return
+        dirty = bool(_git(["status", "--porcelain"], self.repo, check=False).stdout.strip())
         if self.cfg.use_run_branch:
             base = f"agentic/run-{time.strftime('%Y%m%d-%H%M%S')}"
             branch, n = base, 2
             while _git(["rev-parse", "--verify", branch], self.repo, check=False).returncode == 0:
                 branch, n = f"{base}-{n}", n + 1
             _git(["checkout", "-b", branch], self.repo)
-        # Isolate any pre-existing uncommitted work so step commits/resets never touch
-        # it: snapshot it as its own commit on the run branch, leaving a clean HEAD.
-        if _git(["status", "--porcelain"], self.repo, check=False).stdout.strip():
-            _git(["add", "-A"], self.repo)
-            _git(["commit", "-m", "agentic-loop: pre-run snapshot of your uncommitted work",
-                  "--allow-empty"], self.repo)
-            self.log({"event": "pre_run_snapshot"})
+            # Isolate any pre-existing uncommitted work so step commits/resets never touch
+            # it: snapshot it as its own commit on the RUN branch (recoverable via that
+            # branch), leaving a clean HEAD to build on.
+            if dirty:
+                _git(["add", "-A"], self.repo)
+                _git(["commit", "-m", "agentic-loop: pre-run snapshot of your uncommitted work",
+                      "--allow-empty"], self.repo)
+                self.log({"event": "pre_run_snapshot", "branch": branch})
+        elif dirty:
+            # No run branch to quarantine onto — committing here would rewrite the user's
+            # own branch history. Refuse instead.
+            raise StateConflict(
+                "the target repo has uncommitted changes and USE_RUN_BRANCH is off. "
+                "Commit or stash your work first, or enable run branches (USE_RUN_BRANCH=1) "
+                "so the orchestrator can isolate the run.")
 
     def _current_ref(self) -> str:
         """Branch name, or the commit SHA when HEAD is detached (so resume can restore
@@ -191,30 +201,70 @@ class Ledger:
         if _git(["diff", "--cached", "--quiet"], self.repo, check=False).returncode == 0:
             raise NoChangesError(f"step {step.id}: no changes to commit — nothing was produced")
         msg = message.strip() or f"step {step.id}: {step.goal}"
+        # Record intent BEFORE committing so a crash any time before the plan durably records
+        # the commit can be reconciled precisely (adopt_head_if_matches), not by adopting a
+        # random HEAD move. The marker is cleared by clear_pending_commit() AFTER save_plan.
+        self.state["pending_commit"] = {"step_id": step.id, "base_sha": step.base_sha}
+        self._save()
         _git(["commit", "-m", msg], self.repo)
         sha = _git(["rev-parse", "HEAD"], self.repo).stdout.strip()
         step.commit_sha = sha
         self.log({"event": "step_committed", "step": step.id, "sha": sha, "message": msg[:200]})
         return sha
 
+    def clear_pending_commit(self) -> None:
+        if self.state.get("pending_commit") is not None:
+            self.state["pending_commit"] = None
+            self._save()
+
     def head_sha(self) -> str:
         return _git(["rev-parse", "HEAD"], self.repo, check=False).stdout.strip()
 
     def adopt_head_if_matches(self, step: Step) -> Optional[str]:
-        """Crash-window recovery: if this step produced no new diff (so accept hit
-        NoChangesError) but HEAD has advanced past where the step started and that commit
-        isn't already claimed by another step, the step's work was committed just before a
-        crash — adopt that commit instead of forcing a futile reject/descope."""
+        """Crash-window recovery: adopt HEAD as this step's commit ONLY when the orchestrator
+        recorded (via commit_step) that it was mid-commit for THIS step and the commit sits
+        directly on the step's base — never adopt an arbitrary HEAD advance (e.g. a developer
+        self-commit or a gate-command commit)."""
+        marker = self.state.get("pending_commit")
+        if not marker or marker.get("step_id") != step.id:
+            return None
         sha = self.head_sha()
-        if not sha or sha == step.base_sha:
+        base = marker.get("base_sha")
+        if not sha or sha == base:
+            return None
+        parent = _git(["rev-parse", "HEAD^"], self.repo, check=False).stdout.strip()
+        if base and parent != base:
             return None
         plan = self.load_plan()
-        claimed = {s.commit_sha for s in plan.steps} if plan else set()
-        if sha in claimed:
+        if plan and sha in {s.commit_sha for s in plan.steps}:
             return None
         step.commit_sha = sha
+        self.state["pending_commit"] = None
+        self._save()
         self.log({"event": "step_adopted_head", "step": step.id, "sha": sha})
         return sha
+
+    def revert_unclaimed_commits(self, step: Step, plan: Plan, reason: str) -> None:
+        """On descope/replan, if HEAD advanced past the step's base with commits no done
+        step claims (a dev self-commit, or a crash-window commit being abandoned), roll the
+        branch back to the step's base so 'skipped' code doesn't silently ship. reset_to_head
+        only discards UNcommitted work, so this handles the committed case."""
+        base = step.base_sha
+        head = self.head_sha()
+        if not base or head == base:
+            return
+        claimed = {s.commit_sha for s in plan.done_steps()}
+        # Walk base..head; if every commit there is unclaimed, it's this step's abandoned work.
+        revs = _git(["rev-list", f"{base}..{head}"], self.repo, check=False).stdout.split()
+        if not revs or any(r in claimed for r in revs):
+            return  # a done step's commit is in the range — don't destroy it
+        bundle = self.cfg.state_dir / "discarded" / f"reverted-{time.strftime('%Y%m%d-%H%M%S')}"
+        bundle.mkdir(parents=True, exist_ok=True)
+        (bundle / "reverted.diff").write_text(
+            _git(["diff", base, head], self.repo, check=False).stdout, errors="replace")
+        _git(["reset", "--hard", base], self.repo)
+        self.log({"event": "unclaimed_commits_reverted", "step": step.id, "reason": reason,
+                  "count": len(revs), "bundle": str(bundle)})
 
     def reset_to_head(self, reason: str) -> None:
         """Discard uncommitted work (e.g. an abandoned step before a replan), keeping a
@@ -222,12 +272,15 @@ class Ledger:
         verbatim) — `git clean -fd` deletes untracked files permanently. Ignored files
         (.agentic/, node_modules, ...) survive the clean."""
         dump = self.cfg.state_dir / "discarded" / time.strftime("%Y%m%d-%H%M%S")
-        diff = _git(["diff", "HEAD"], self.repo, check=False).stdout
+        # --binary + raw bytes so modified binary/non-UTF-8 tracked files are recoverable
+        # (a plain text diff would lose them before `reset --hard` deletes them).
+        diff_bytes = subprocess.run(["git", *_GIT_SAFE, "diff", "HEAD", "--binary"],
+                                    cwd=str(self.repo), capture_output=True).stdout
         untracked = self._untracked_files()
-        if diff.strip() or untracked:
+        if diff_bytes.strip() or untracked:
             dump.mkdir(parents=True, exist_ok=True)
-            if diff.strip():
-                (dump / "tracked.diff").write_text(diff, errors="replace")
+            if diff_bytes.strip():
+                (dump / "tracked.diff").write_bytes(diff_bytes)
             for rel in untracked:
                 src = self.repo / rel
                 if src.is_file():

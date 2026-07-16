@@ -149,6 +149,32 @@ class TestEvidence(unittest.TestCase):
         probs = verify_evidence(d, step(), HANDOVER)
         self.assertTrue(any("unsatisfied" in p for p in probs))
 
+    def test_section_header_quotes_rejected(self):
+        # The bypass round 3 found: quoting the packet's own scaffolding must NOT pass.
+        for header in ["Diff vs last accepted commit", "Gate transcript (tail)",
+                       "self-reported — verify against the diff", "no changes"]:
+            d = {"criteria_evidence": [
+                {"criterion": "endpoint returns 200", "satisfied": True, "evidence": header},
+                {"criterion": "test added", "satisfied": True,
+                 "evidence": "test_health.py passed 1 test in 0.2s"},
+            ]}
+            probs = verify_evidence(d, step(), HANDOVER)
+            self.assertTrue(probs, f"header {header!r} was wrongly accepted as evidence")
+
+    def test_overlapping_criteria_do_not_starve(self):
+        s = Step(id="1", goal="g", verify=["pytest -q"],
+                 acceptance_criteria=["GET /health returns 200",
+                                      "GET /health returns 200 with a JSON body"])
+        corpus = ("built the endpoint: GET /health returns 200\n"
+                  "response asserted: GET /health returns 200 with a JSON body payload")
+        d = {"criteria_evidence": [
+            {"criterion": "GET /health returns 200", "satisfied": True,
+             "evidence": "built the endpoint: GET /health returns 200"},
+            {"criterion": "GET /health returns 200 with a JSON body", "satisfied": True,
+             "evidence": "GET /health returns 200 with a JSON body payload"},
+        ]}
+        self.assertEqual(verify_evidence(d, s, corpus), [])
+
     def test_whitespace_normalized_quotes_match(self):
         d = {"criteria_evidence": [
             {"criterion": "endpoint returns 200", "satisfied": True,

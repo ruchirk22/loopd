@@ -29,18 +29,25 @@ import urllib.request
 
 
 def _killpg(pid: int, wait: "subprocess.Popen | None" = None) -> None:
+    """SIGTERM then SIGKILL the whole group; success is the GROUP being gone, not just the
+    leader (a child trapping SIGTERM keeps the group alive)."""
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
             os.killpg(pid, sig)
         except (ProcessLookupError, PermissionError, OSError):
-            return
-        if wait is not None:
+            break
+        deadline = time.time() + (3 if sig == signal.SIGTERM else 2)
+        while time.time() < deadline:
             try:
-                wait.wait(timeout=5)
+                os.killpg(pid, 0)
+            except OSError:
+                if wait is not None and wait.poll() is None:
+                    try:
+                        wait.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        pass
                 return
-            except subprocess.TimeoutExpired:
-                continue
-        return
+            time.sleep(0.1)
 
 
 def _fail(msg: str) -> int:

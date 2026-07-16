@@ -21,14 +21,21 @@ class TestTrivialCommands(unittest.TestCase):
                     "sleep 5", "timeout=60;true", "ls", "pwd", "cat README.md",
                     "test -d .", "test 1 -eq 1", "/usr/bin/true", "# verified manually",
                     "true || pytest", "pytest || true", "echo x && true",
-                    "sleep 1 && true", "pytest ; true", "make check || echo skipped"]:
+                    "sleep 1 && true", "pytest ; true", "make check || echo skipped",
+                    # exotic always-exit-0 bypasses the tri-state evaluator must catch:
+                    "(true)", "( exit 0 )", "{ true; }", "! false", "env true",
+                    "command true", "FOO=1 true", "pytest &", "if true; then :; fi"]:
             self.assertTrue(is_trivial_command(cmd), cmd)
 
     def test_not_trivial(self):
         for cmd in ["pytest -q", "npm test", "echo hi | grep hi",
                     "test -f out.txt && echo ok", "python3 -m orchestrator.probe port --port 80",
                     "timeout=900;npm run build", "true ; pytest -q", "npm ci && npm test",
-                    "test -f out.txt"]:
+                    "test -f out.txt",
+                    # genuine checks using fail-on-error idioms MUST NOT be rejected:
+                    "pytest || exit 1", "test -f dist/app.js || exit 1", "pytest || false",
+                    "set -e; npm ci; npm test; echo OK", "! test -f forbidden.txt",
+                    "make build && make test", "if [ -f x ]; then echo y; else exit 1; fi"]:
             self.assertFalse(is_trivial_command(cmd), cmd)
 
 

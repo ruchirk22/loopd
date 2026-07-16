@@ -102,44 +102,56 @@ def _norm(s: str) -> str:
     return " ".join(s.split())
 
 
-# Boilerplate that is present in EVERY green handover — quoting it proves nothing.
+# Boilerplate that proves nothing even if it appears in the proof corpus.
 _BANNED_EVIDENCE = {"all gates passed", "gates failed", "gate verdict", "ground truth",
                     "ok", "done", "pass", "passed", "tests pass", "it works",
-                    "looks good", "lgtm", "correct", "verified", "n/a"}
+                    "looks good", "lgtm", "correct", "verified", "n/a",
+                    "no changes", "empty", "no gate output", "no developer output",
+                    "self-reported", "verify against the diff"}
 _MIN_QUOTE = 12
-# Only these packet sections are real proof — not the gate-verdict banner or headings.
-_EVIDENCE_SECTIONS = ("Developer's structured summary", "Diff vs last accepted commit",
-                      "Gate transcript")
 
 
-def _evidence_haystack(handover_text: str) -> str:
-    """The parts of the packet that constitute proof: dev summary, diff, gate transcript
-    — excluding the banner/headers a PM could quote without reading anything."""
-    hay = handover_text
-    for marker in _EVIDENCE_SECTIONS:
-        idx = handover_text.find(marker)
-        if idx != -1:
-            return _norm(handover_text[idx:])
-    return _norm(hay)
+def _proof_haystack(corpus: str) -> str:
+    """Normalize the proof corpus for substring matching, dropping git/diff scaffolding
+    lines (headers, hunk markers, fences) that are structural rather than content."""
+    kept = []
+    for line in corpus.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if s.startswith(("###", "```", "diff --git", "index ", "@@", "+++ ", "--- ",
+                         "[setup]", "[teardown]", "[ok]", "$ ")):
+            continue
+        kept.append(s)
+    return _norm("\n".join(kept))
 
 
-def _match_criterion(quoted: str, criteria: List[str]) -> Optional[int]:
+def _match_criterion(quoted: str, criteria: List[str], covered: set) -> Optional[int]:
     q = _norm(quoted).lower()
-    for i, c in enumerate(criteria):
-        if q and (q in _norm(c).lower() or _norm(c).lower() in q):
-            return i
+    if not q:
+        return None
+    # Prefer an exact (normalized) match, then the longest substring match, skipping
+    # criteria already covered — so overlapping criteria don't starve each other.
+    exact = [i for i, c in enumerate(criteria) if i not in covered and _norm(c).lower() == q]
+    if exact:
+        return exact[0]
+    subs = [i for i, c in enumerate(criteria)
+            if i not in covered and (q in _norm(c).lower() or (len(q) >= 6 and _norm(c).lower() in q))]
+    if subs:
+        return max(subs, key=lambda i: len(criteria[i]))
     return None
 
 
-def verify_evidence(directive: dict, step: Step, handover_text: str) -> List[str]:
-    """Accept requires, per acceptance criterion, an exact quote from the PROOF sections
-    of the handover packet. Empty/short/boilerplate quotes, fabricated quotes, duplicate
-    quotes, and unmatched criteria are all refused — this is the anti-rubber-stamp rail."""
+def verify_evidence(directive: dict, step: Step, proof_corpus: str) -> List[str]:
+    """Accept requires, per acceptance criterion, an exact quote from the PROOF corpus
+    (dev summary / real diff / gate transcript — never the packet scaffolding). Empty,
+    short, boilerplate, duplicate, fabricated, and unmatched-criterion evidence are all
+    refused. This is the anti-rubber-stamp rail."""
     problems = []
     criteria = [c for c in step.acceptance_criteria if c.strip()]
     evidence = directive.get("criteria_evidence") or []
-    hay = _evidence_haystack(handover_text)
-    covered = set()
+    hay = _proof_haystack(proof_corpus)
+    covered: set = set()
     seen_quotes = set()
 
     for i, e in enumerate(evidence):
@@ -152,7 +164,7 @@ def verify_evidence(directive: dict, step: Step, handover_text: str) -> List[str
             problems.append(f"{label}: empty evidence — quote the exact text from the diff or gate transcript that proves it")
             continue
         if quote.lower() in _BANNED_EVIDENCE:
-            problems.append(f"{label}: {quote!r} is boilerplate, not proof — quote specific diff/output text")
+            problems.append(f"{label}: {quote!r} is boilerplate/scaffolding, not proof — quote specific diff/output text")
             continue
         if len(quote) < _MIN_QUOTE:
             problems.append(f"{label}: evidence {quote!r} is too short to verify — quote at least {_MIN_QUOTE} characters verbatim from the packet")
@@ -164,9 +176,9 @@ def verify_evidence(directive: dict, step: Step, handover_text: str) -> List[str
         if quote not in hay:
             problems.append(f"{label}: not an exact quote from the handover's proof sections: {quote[:120]!r}")
             continue
-        idx = _match_criterion(str(e.get("criterion", "")), criteria)
+        idx = _match_criterion(str(e.get("criterion", "")), criteria, covered)
         if idx is None:
-            problems.append(f"{label}: criterion {str(e.get('criterion',''))[:80]!r} does not match any of the step's acceptance criteria")
+            problems.append(f"{label}: criterion {str(e.get('criterion',''))[:80]!r} does not match a distinct acceptance criterion")
             continue
         covered.add(idx)
 
@@ -217,6 +229,9 @@ class PMSession:
         self.brief = brief
         self.system = cfg.prompt("pm_system.md")
         self.session_id: Optional[str] = ledger.state.get("pm_session_id")
+        # True once the session was lost mid-stream and reseeded fresh (context not
+        # continuous); blocks non-degradable turns like checkpoints from fabricating.
+        self.degraded: bool = False
 
     # ----- session plumbing -----
 
@@ -248,15 +263,17 @@ class PMSession:
         context-dependent turn never fabricates memory from a blank session.
 
         Raises PMTurnError after the ladder is exhausted."""
+        # A non-degradable turn (checkpoint) must run on genuinely continuous context: if
+        # the current session was born from a degraded fallback, refuse rather than
+        # fabricate memory from it.
+        if not degradable and self.degraded:
+            raise PMTurnError(f"PM turn {label!r} needs continuous session context that was lost")
         last_err = ""
-        attempts, max_attempts = 0, 4
+        attempts, max_attempts, timeout_retries = 0, 4, 0
         while attempts < max_attempts:
             attempts += 1
             resume = self.session_id
             if resume is None:
-                if not degradable and self.ledger.state.get("pm_session_id") is not None:
-                    # Non-degradable turn on a lost session: refuse rather than fabricate.
-                    raise PMTurnError(f"PM turn {label!r} needs live session context that is unavailable")
                 prompt = self._seed_text(plan) + "\n\n---\n\n" + payload
             else:
                 prompt = payload
@@ -288,21 +305,26 @@ class PMSession:
             is_timeout = res.raw.get("error") == "timeout"
             self.ledger.log({"event": "pm_turn_failed", "label": label,
                              "timeout": is_timeout, "error": last_err[:500]})
-            if resume is not None and not is_timeout:
-                # A resumed session failed fast (stale/invalid) — reincarnate now.
+            if resume is not None and is_timeout and timeout_retries == 0:
+                timeout_retries += 1  # retry the SAME session ONCE (CLI may have a partial turn)
+                continue
+            if resume is not None:
+                # Fast/stale failure, or a second timeout — the session is unusable.
                 if not degradable:
                     raise PMTurnError(f"PM turn {label!r} lost its session and cannot degrade: {last_err}")
                 self.ledger.log({"event": "pm_degraded_resume", "label": label})
                 self.session_id = None
                 self.ledger.set_pm_session(None)
-            elif resume is not None and is_timeout:
-                pass  # retry the SAME session once; the CLI may have persisted a partial turn
+                self.degraded = True  # a fresh reseed from here is NOT continuous context
         raise PMTurnError(f"PM turn {label!r} failed after {attempts} attempts: {last_err}")
 
     def reincarnate(self) -> None:
-        """Drop the session; the next turn() seeds a fresh one from brief+checkpoint+digest."""
+        """Drop the session; the next turn() seeds a fresh one from brief+checkpoint+digest.
+        This is a DELIBERATE, context-preserving handoff (post-checkpoint), so it clears the
+        degraded flag — unlike a mid-stream session loss."""
         self.session_id = None
         self.ledger.set_pm_session(None)
+        self.degraded = False
 
     # ----- rails shown to the PM every turn -----
 

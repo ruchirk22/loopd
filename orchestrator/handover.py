@@ -32,13 +32,19 @@ class Handover:
     flags: List[str] = field(default_factory=list)
     high_risk: bool = False
     dev_summary: str = ""
+    # The PROOF bodies only (dev summary + real diff + gate transcript), with none of the
+    # packet's fixed headers/placeholders — this is what accept-evidence quotes must match,
+    # so a PM can't cite scaffolding that appears in every handover.
+    evidence_corpus: str = ""
 
 
 def _integrity_flags(diff: dict, verify_cmds: List[str], tests_expected: bool):
     """Returns (flags, high_risk). high_risk flags force the PM to justify acceptance."""
     flags, high_risk = [], False
     if diff["empty"]:
-        flags.append("NO_OP_DIFF: the developer produced no changes relative to the last commit.")
+        high_risk = True
+        flags.append("NO_OP_DIFF: the developer produced no changes relative to the last commit — "
+                     "if you believe the work is already present, say why in integrity_ack.")
     touched_tests = [f for f in diff["changed_files"] if _TEST_PATH.search(f)]
     if touched_tests and not tests_expected:
         high_risk = True
@@ -126,5 +132,18 @@ def build_handover(
                          "that names each flag and cites the specific diff evidence that clears it."]
 
     text = "\n".join(sections)
+    # Proof corpus = the actual content bodies only. Placeholders that appear when a
+    # section is empty are deliberately excluded so they can never be quoted as "evidence".
+    corpus_parts = []
+    if dev_res is not None and (dev_res.structured or (dev_res.text or "").strip()):
+        corpus_parts.append(dev_summary)
+    if diff["stat"]:
+        corpus_parts.append(diff["stat"])
+    if not diff["empty"]:
+        corpus_parts.append(diff["diff"])
+    if gate_log.strip():
+        corpus_parts.append(gate_log)
+    evidence_corpus = "\n".join(corpus_parts)
     return Handover(text=text, bytes=len(text.encode()), gates_passed=gates_passed,
-                    flags=flags, high_risk=high_risk, dev_summary=dev_summary)
+                    flags=flags, high_risk=high_risk, dev_summary=dev_summary,
+                    evidence_corpus=evidence_corpus)

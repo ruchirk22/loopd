@@ -26,70 +26,158 @@ class PlanValidationError(ValueError):
         super().__init__("; ".join(problems))
 
 
+# Tri-state exit classification: always exits 0, always non-zero, or runtime-dependent.
+ZERO, NONZERO, DEPENDS = "zero", "nonzero", "depends"
+_WRAPPERS = {"env", "command", "nohup", "time", "exec", "stdbuf", "builtin", "eval"}
+_KEYWORDS = {"if", "then", "elif", "else", "fi", "while", "until", "for", "do", "done",
+             "case", "esac", "in", "select", "function", ";;"}
+
+
 def _base_exe(token: str) -> str:
-    """Strip a path and env-var prefixes: '/usr/bin/true' -> 'true'."""
     return token.rsplit("/", 1)[-1]
 
 
-def _clause_is_noop(clause: str) -> bool:
-    """Does this single (operator-free) clause verify nothing?"""
+def _atom_class(clause: str) -> str:
+    """Exit class of a single operator-free clause, seeing through NAME=val prefixes,
+    wrapper words (env/command/exec/…), a leading `!` negation, and subshell/brace groups."""
     clause = clause.strip()
     if not clause or clause.startswith("#"):
-        return True
+        return ZERO
+    # Unwrap ( ... ) and { ...; } groups and recurse.
+    if clause.startswith("(") and clause.endswith(")"):
+        return _expr_class(clause[1:-1])
+    if clause.startswith("{") and clause.endswith("}"):
+        return _expr_class(clause[1:-1].rstrip(";"))
     try:
         toks = shlex.split(clause, comments=True)
     except ValueError:
-        return False  # unparseable → not obviously trivial; let it run
+        return DEPENDS  # unparseable → assume it checks something (never a false reject)
+    # Leading `!` negates the exit class.
+    if toks and toks[0] == "!":
+        inner = _atom_class(" ".join(shlex.quote(t) for t in toks[1:]))
+        return {ZERO: NONZERO, NONZERO: ZERO, DEPENDS: DEPENDS}[inner]
+    # Drop NAME=value assignment prefixes and wrapper words.
+    while toks and (re.match(r"^[A-Za-z_]\w*=", toks[0]) or _base_exe(toks[0]) in _WRAPPERS):
+        toks = toks[1:]
     if not toks:
-        return True
+        return ZERO  # bare assignments / `env` with no command
     exe = _base_exe(toks[0])
+    if exe == "false":
+        return NONZERO
+    if exe == "exit":
+        return ZERO if (len(toks) == 1 or toks[1] == "0") else NONZERO
     if exe in _NOOP_CMDS:
-        return True
+        return ZERO
     if exe in ("test", "["):
         rest = " ".join(t for t in toks[1:] if t != "]").strip()
-        if rest in _ALWAYS_TRUE_TEST:
-            return True
-    return False
+        return ZERO if rest in _ALWAYS_TRUE_TEST else DEPENDS
+    if exe in _KEYWORDS:
+        return DEPENDS  # compound construct handled by the keyword heuristic below
+    return DEPENDS
 
 
-def _can_fail(expr: str) -> bool:
-    """Can this shell expression ever exit non-zero — i.e. does it actually check
-    anything? Models real exit-status semantics for ; && || and pipes, so it screens
-    the demonstrated bypasses ('true || pytest', 'echo && true', 'pytest || true') while
-    NOT flagging genuine checks ('test -f x && echo ok')."""
-    expr = expr.strip()
+def _combine_and(a: str, b: str) -> str:
+    # A && B exits 0 iff both do.
+    can_zero = a in (ZERO, DEPENDS) and b in (ZERO, DEPENDS)
+    can_nonzero = a in (NONZERO, DEPENDS) or (a in (ZERO, DEPENDS) and b in (NONZERO, DEPENDS))
+    return _from_flags(can_zero, can_nonzero)
+
+
+def _combine_or(a: str, b: str) -> str:
+    # A || B exits 0 iff A does, or A fails and B does.
+    can_zero = a in (ZERO, DEPENDS) or (a in (NONZERO, DEPENDS) and b in (ZERO, DEPENDS))
+    can_nonzero = a in (NONZERO, DEPENDS) and b in (NONZERO, DEPENDS)
+    return _from_flags(can_zero, can_nonzero)
+
+
+def _from_flags(can_zero: bool, can_nonzero: bool) -> str:
+    if can_zero and can_nonzero:
+        return DEPENDS
+    return ZERO if can_zero else NONZERO
+
+
+def _pipe_class(expr: str) -> str:
+    # Pipeline exit is the last stage (pipefail off). A trailing `&` (background) always 0.
+    if expr.rstrip().endswith("&") and not expr.rstrip().endswith("&&"):
+        return ZERO
+    return _atom_class(expr.split("|")[-1])
+
+
+def _unwrap(expr: str) -> str:
+    """Remove one layer of surrounding ( ) or { } when it wraps the whole expression
+    (balanced), so `{ true; }` / `(true)` are classified by their bodies."""
+    e = expr.strip()
+    for op, cl in (("(", ")"), ("{", "}")):
+        if len(e) >= 2 and e.startswith(op) and e.endswith(cl):
+            depth, ok = 0, True
+            for ch in e[1:-1]:
+                if ch == op:
+                    depth += 1
+                elif ch == cl:
+                    depth -= 1
+                    if depth < 0:
+                        ok = False
+                        break
+            if ok and depth == 0:
+                return e[1:-1].strip().rstrip(";").strip()
+    return e
+
+
+def _expr_class(expr: str, set_e: bool = False) -> str:
+    expr = _unwrap(expr.strip())
     if not expr:
-        return False
-    # `;` and newline: only the LAST segment sets the exit status (earlier fails masked).
-    seq = [s for s in re.split(r"[;\n]", expr) if s.strip()]
-    if len(seq) > 1:
-        return _can_fail(seq[-1])
-    # `&&` / `||` (equal precedence, left-associative). Fold left tracking can_fail.
+        return ZERO
+    # `set -e` in a leading segment makes every later segment's failure propagate.
+    segs = [s for s in re.split(r"[;\n]", expr) if s.strip()]
+    if len(segs) > 1:
+        if re.match(r"^set\s+-\w*e", segs[0].strip()):
+            return _seq_class(segs[1:], set_e=True)
+        return _seq_class(segs, set_e=set_e)
+    # Single segment: fold && / || left-to-right.
     parts = re.split(r"(&&|\|\|)", expr)
-    cf = _can_fail_pipe(parts[0])
+    cls = _pipe_class(parts[0])
     i = 1
     while i < len(parts) - 1:
-        op, rhs = parts[i].strip(), parts[i + 1]
-        rhs_cf = _can_fail_pipe(rhs)
-        cf = (cf or rhs_cf) if op == "&&" else (cf and rhs_cf)
+        op, rhs = parts[i].strip(), _pipe_class(parts[i + 1])
+        cls = _combine_and(cls, rhs) if op == "&&" else _combine_or(cls, rhs)
         i += 2
-    return cf
+    return cls
 
 
-def _can_fail_pipe(expr: str) -> bool:
-    # In a pipeline `A | B | C` the exit status is the last stage (pipefail off).
-    stages = expr.split("|")
-    return not _clause_is_noop(stages[-1])
+def _seq_class(segs, set_e: bool) -> str:
+    if not set_e:
+        return _expr_class(segs[-1])  # only the last segment sets the status
+    # Under set -e the sequence behaves like an && chain.
+    cls = _expr_class(segs[0])
+    for s in segs[1:]:
+        cls = _combine_and(cls, _expr_class(s))
+    return cls
+
+
+def _clause_is_noop(clause: str) -> bool:
+    return _atom_class(clause) == ZERO
 
 
 def is_trivial_command(cmd: str) -> bool:
-    """True if the command verifies nothing — it is (or can short-circuit to) a command
-    that always exits 0 regardless of whether the real work was done."""
-    norm = cmd.strip()
-    norm = re.sub(r"^timeout=\d+\s*;\s*", "", norm)
+    """True if the command verifies nothing — it always exits 0 regardless of whether the
+    real work was done. Models real POSIX exit semantics (; && || | & ! set -e, subshells,
+    NAME=val and wrapper prefixes) so it screens the demonstrated no-op bypasses without
+    rejecting genuine checks like `pytest || exit 1` or `set -e; npm ci; npm test`."""
+    norm = re.sub(r"^timeout=\d+\s*;\s*", "", cmd.strip())
     if not norm or norm.startswith("#"):
         return True
-    return not _can_fail(norm)
+    if _expr_class(norm) == ZERO:
+        return True
+    # Compound keyword constructs (if/while/for/case) are opaque to the algebra above; flag
+    # them as trivial only when every command clause between the keywords is itself a no-op
+    # (e.g. `if true; then :; fi`), while a real condition/body (`if [ -f x ]; …`) is kept.
+    if re.search(r"\b(if|while|until|for|case)\b", norm):
+        skeleton = re.sub(r"\b(if|then|elif|else|fi|while|until|for|do|done|case|esac|in|select)\b",
+                          ";", norm)
+        clauses = [c for c in re.split(r"&&|\|\||[;|&\n]", skeleton) if c.strip()]
+        if clauses and all(_clause_is_noop(c) for c in clauses):
+            return True
+    return False
 
 
 @dataclass
@@ -221,17 +309,27 @@ def validate(plan: Plan) -> List[str]:
     return problems
 
 
+def _sig(step: Step) -> tuple:
+    """Identity for carry-over: normalized goal + verify (not counters/status)."""
+    return (" ".join(step.goal.split()),
+            tuple(" ".join(v.split()) for v in step.verify))
+
+
 def apply_mutations(plan: Plan, ops: List[dict]) -> Plan:
     """Apply PM-authored mutations to a COPY of the plan and validate the result.
     Done/skipped steps are immutable. Raises PlanValidationError on any problem."""
     new = copy.deepcopy(plan)
     problems: List[str] = []
+    removed_counters: dict = {}  # signature -> (attempts, rejections), for remove+add laundering
 
     for op in ops or []:
         kind = (op.get("op") or "").strip()
         if kind == "add":
             step = Step.from_dict(op.get("step") or {})
             step.status = PENDING
+            carried = removed_counters.get(_sig(step))
+            if carried:  # re-adding a just-removed identical step keeps its spent caps
+                step.attempts, step.rejections = carried
             after_id = op.get("after_id")
             if after_id:
                 idx = next((i for i, s in enumerate(new.steps) if s.id == after_id), None)
@@ -250,8 +348,13 @@ def apply_mutations(plan: Plan, ops: List[dict]) -> Plan:
             if target.status in (DONE, SKIPPED):
                 problems.append(f"update: step {target.id!r} is {target.status} and immutable")
                 continue
-            before = (target.goal, target.details, tuple(target.acceptance_criteria),
-                      tuple(target.verify), tuple(target.setup), tuple(target.teardown))
+            def _norm_fields(s: Step) -> tuple:
+                # whitespace-insensitive; only SUBSTANTIVE fields count toward materiality
+                return (" ".join(s.goal.split()),
+                        tuple(" ".join(c.split()) for c in s.acceptance_criteria),
+                        tuple(" ".join(v.split()) for v in s.verify))
+
+            before = _norm_fields(target)
             for key in ("goal", "details"):
                 if key in patch and patch[key] is not None:
                     setattr(target, key, str(patch[key]))
@@ -261,11 +364,9 @@ def apply_mutations(plan: Plan, ops: List[dict]) -> Plan:
                     if isinstance(val, str):
                         val = [val]
                     setattr(target, key, [str(v) for v in val])
-            after = (target.goal, target.details, tuple(target.acceptance_criteria),
-                     tuple(target.verify), tuple(target.setup), tuple(target.teardown))
-            if after == before:
-                problems.append(f"update: step {target.id!r} changes nothing — an "
-                                "empty update cannot be used to reset the retry caps")
+            if _norm_fields(target) == before:
+                problems.append(f"update: step {target.id!r} does not change goal, acceptance "
+                                "criteria, or verify — a cosmetic edit cannot reset the retry caps")
                 continue
             # only a MATERIALLY changed step earns a clean retry slate
             target.attempts = 0
@@ -279,6 +380,8 @@ def apply_mutations(plan: Plan, ops: List[dict]) -> Plan:
             if target.status in (DONE, SKIPPED):
                 problems.append(f"remove: step {sid!r} is {target.status} and immutable")
                 continue
+            if target.attempts or target.rejections:  # so a remove+re-add can't launder caps
+                removed_counters[_sig(target)] = (target.attempts, target.rejections)
             new.steps.remove(target)
         elif kind == "reorder":
             order = [str(x) for x in (op.get("order") or [])]

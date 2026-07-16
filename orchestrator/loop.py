@@ -33,7 +33,15 @@ class RunAborted(RuntimeError):
 
 
 def run(task: Optional[str], cfg: Config, resume: bool = False, fresh: bool = False) -> int:
-    ledger = Ledger.load_or_start(cfg, resume=resume, fresh=fresh)
+    # StateConflict (bad/missing/finished state, dirty tree w/o run branch) is a pre-loop
+    # setup failure (exit 2, handled by run.py). A GitError while (re)establishing the repo
+    # is resumable but has no ledger yet to escalate through — report and exit 1.
+    try:
+        ledger = Ledger.load_or_start(cfg, resume=resume, fresh=fresh)
+    except GitError as exc:
+        print(f"\nStopping on a git error during setup: {exc}\n"
+              "Fix the repo state, then retry (--resume-run if a run was in progress).")
+        return 1
     try:
         return _run(task, cfg, ledger, resume)
     except BudgetExceeded as exc:
@@ -136,8 +144,7 @@ def _plan_phase(pm: PMSession, ledger: Ledger, cfg: Config) -> Plan:
 def _step_phase(pm: PMSession, step: Step, plan: Plan, ledger: Ledger, cfg: Config) -> Plan:
     print(f"→ Step {step.id}: {step.goal}")
     step.status = IN_PROGRESS
-    if not step.base_sha:
-        step.base_sha = ledger.head_sha()  # baseline for crash-window commit detection
+    step.base_sha = ledger.head_sha()  # baseline for this attempt: detects out-of-band commits
     ledger.save_plan(plan)
 
     d = pm.dispatch_turn(step, plan)
@@ -168,7 +175,7 @@ def _step_phase(pm: PMSession, step: Step, plan: Plan, ledger: Ledger, cfg: Conf
             allowed = ["replan", "descope", "abort"]
 
         d = pm.review_turn(step, ho.text, allowed, plan, high_risk=ho.high_risk)
-        d = _valid_directive(pm, d, allowed, plan, ledger, cfg, step, ho.text,
+        d = _valid_directive(pm, d, allowed, plan, ledger, cfg, step, ho.evidence_corpus,
                              require_integrity_ack=ho.high_risk)
 
         while True:  # resolve the verdict for THIS handover
@@ -192,10 +199,12 @@ def _step_phase(pm: PMSession, step: Step, plan: Plan, ledger: Ledger, cfg: Conf
                     d = pm.corrective_turn(
                         [f"{e} — `accept` is refused for a no-op; choose another action"],
                         allowed, plan, step)
-                    d = _valid_directive(pm, d, allowed, plan, ledger, cfg, step, ho.text)
+                    d = _valid_directive(pm, d, allowed, plan, ledger, cfg, step,
+                                         ho.evidence_corpus, require_integrity_ack=ho.high_risk)
                     continue
                 step.status = DONE
-                ledger.save_plan(plan)  # near-atomic with the commit; resume reconciles the gap
+                ledger.save_plan(plan)      # durably records the commit...
+                ledger.clear_pending_commit()  # ...only now is the crash-window marker safe to drop
                 print(f"   ✓ accepted, committed {sha[:9]}\n")
                 return plan
             if v == "reject":
@@ -206,15 +215,22 @@ def _step_phase(pm: PMSession, step: Step, plan: Plan, ledger: Ledger, cfg: Conf
                 print(f"   ✗ PM rejected (feedback sent to developer, "
                       f"rejection {step.rejections}/{cfg.max_rejections_per_step})")
                 prompt = d["next_prompt"]
-                # Honor the PM's choice of a fresh developer session (e.g. the current
-                # one is contaminated); default to resuming the same session.
-                resume_sid = None if d.get("dev_session") == "fresh" else (step.dev_session_id or None)
+                # Honor the PM's choice of a fresh developer session (e.g. the current one
+                # is contaminated); clear the stored session so later cycles can't fall back
+                # to the discarded one. Default is to resume the same session.
+                if d.get("dev_session") == "fresh":
+                    resume_sid = None
+                    step.dev_session_id = ""
+                    ledger.save_plan(plan)
+                else:
+                    resume_sid = step.dev_session_id or None
                 break  # back to the dev loop with the PM's feedback
             if v == "replan":
                 return _apply_replan(pm, d, plan, ledger, cfg, step)
             if v == "descope":
                 step.status = SKIPPED
                 step.skip_reason = str(d.get("reasoning", ""))[:500]
+                ledger.revert_unclaimed_commits(step, plan, f"descope step {step.id}")
                 ledger.reset_to_head(f"descope step {step.id}")
                 ledger.save_plan(plan)
                 ledger.log({"event": "step_descoped", "step": step.id,
@@ -229,6 +245,7 @@ def _inner_dev_loop(prompt: str, resume_sid: Optional[str], original_prompt: str
                     step: Step, plan: Plan, ledger: Ledger, cfg: Config):
     """dev <-> gates without spending PM turns: retry with the gate transcript until
     green or the attempt cap for this cycle is spent."""
+    cycle_prompt = prompt  # this cycle's starting instructions (dispatch, or reject feedback)
     gate_log, dev_err = "", ""
     dev_res = None
     sid = resume_sid
@@ -237,6 +254,12 @@ def _inner_dev_loop(prompt: str, resume_sid: Optional[str], original_prompt: str
         ledger.save_plan(plan)
         print(f"   dev attempt {step.attempts}…")
         res = developer.run_prompt(prompt, cfg, resume_session=sid)
+        # Persist the session id BEFORE charging (for both ok and error), so a budget stop
+        # resumes the right dev session rather than a stale one.
+        if res.session_id:
+            sid = res.session_id
+            step.dev_session_id = sid
+            ledger.save_plan(plan)
         ledger.spend(res.cost_usd, step)
         dev_res = res
 
@@ -244,22 +267,16 @@ def _inner_dev_loop(prompt: str, resume_sid: Optional[str], original_prompt: str
             dev_err = res.text[:2000]
             ledger.log({"event": "dev_error", "step": step.id, "error": dev_err[:500]})
             print("   developer call errored")
-            sid = res.session_id or sid
             context = (f"[previous attempt ended abnormally]\n{dev_err}\n\n"
                        f"[last verification transcript]\n{gate_log[-2000:]}")
             if sid:
                 prompt = ("Your previous run on this step ended abnormally.\n\n" + context +
                           "\n\nInspect the repository's current state, then continue the step.")
-            else:  # fresh session needs the full brief again — feedback is never dropped
-                prompt = developer.error_retry_prompt(original_prompt, context)
+            else:  # fresh session: re-send THIS cycle's instructions + context (never dropped)
+                prompt = developer.error_retry_prompt(cycle_prompt, context)
             continue
 
         dev_err = ""
-        sid = res.session_id or sid
-        if sid:
-            step.dev_session_id = sid
-            ledger.save_plan(plan)
-
         passed, gate_log = gates.run_gates(step.verify, cfg.repo, timeout_s=cfg.gate_timeout_s,
                                            setup=step.setup, teardown=step.teardown)
         ledger.log({"event": "gates", "step": step.id, "passed": passed})
@@ -346,6 +363,8 @@ def _apply_replan(pm: PMSession, d: dict, plan: Plan, ledger: Ledger, cfg: Confi
         print("\n" + ledger.report(plan))
         print(f"\nStopping: replan cap ({cfg.max_replans}) exhausted. Escalation report: {path}")
         raise RunAborted(1, "replan cap exhausted")
+    if step is not None:
+        ledger.revert_unclaimed_commits(step, plan, "replan")
     ledger.reset_to_head("replan")
     for attempt in (1, 2):
         problems: List[str] = []

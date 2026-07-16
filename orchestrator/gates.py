@@ -65,17 +65,35 @@ def _run_one(cmd: str, cwd: Path, timeout_s: int, logs: List[str]) -> bool:
     return True
 
 
+def _group_gone(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+        return False
+    except ProcessLookupError:
+        return True
+    except (PermissionError, OSError):
+        return True
+
+
 def _kill_group(proc: subprocess.Popen) -> None:
+    """Kill the whole process group, escalating to SIGKILL. Success is the GROUP being
+    gone (leader death is not enough — a SIGTERM-trapping child keeps the group alive)."""
+    pgid = proc.pid  # pgid == pid thanks to start_new_session
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
-            os.killpg(proc.pid, sig)  # pgid == pid thanks to start_new_session
+            os.killpg(pgid, sig)
         except (ProcessLookupError, PermissionError, OSError):
-            return
-        try:
-            proc.wait(timeout=5)
-            return
-        except subprocess.TimeoutExpired:
-            continue
+            break
+        deadline = time.time() + (3 if sig == signal.SIGTERM else 2)
+        while time.time() < deadline:
+            if _group_gone(pgid):
+                proc.wait(timeout=1) if proc.poll() is None else None
+                return
+            time.sleep(0.1)
+    try:
+        proc.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def run_gates(

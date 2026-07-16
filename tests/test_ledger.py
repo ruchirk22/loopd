@@ -150,15 +150,52 @@ class TestLedger(unittest.TestCase):
         step = Step(id="1", goal="g", acceptance_criteria=["a"], verify=["true"])
         step.base_sha = led.head_sha()
         led.save_plan(Plan(steps=[step]))
-        # simulate the crash window: work got committed but the step wasn't marked done
+        # crash window: commit_step ran (marker set, HEAD advanced) but clear_pending_commit
+        # never did, and the plan still shows the step in_progress with no commit_sha.
         (self.repo / "shipped.txt").write_text("done\n")
-        led.commit_step(step, "step 1: shipped")
-        committed = step.commit_sha
+        committed = led.commit_step(step, "step 1: shipped")
+        self.assertIsNotNone(led.state["pending_commit"])
         step.commit_sha = ""  # as if save_plan never ran
         led.save_plan(Plan(steps=[step]))
-        # on the no-op re-accept, adoption recovers the commit instead of forcing descope
+        # on the no-op re-accept, adoption recovers exactly this step's commit
         adopted = led.adopt_head_if_matches(step)
         self.assertEqual(adopted, committed)
+        self.assertIsNone(led.state["pending_commit"])  # cleared on adoption
+
+    def test_adopt_refuses_without_marker(self):
+        # a developer self-commit (no orchestrator marker) must NOT be adopted
+        led = Ledger.load_or_start(self.cfg)
+        step = Step(id="1", goal="g", acceptance_criteria=["a"], verify=["true"])
+        step.base_sha = led.head_sha()
+        (self.repo / "sneaky.txt").write_text("dev committed this itself\n")
+        _git = __import__("subprocess").run
+        _git(["git", "add", "-A"], cwd=str(self.repo))
+        _git(["git", "commit", "-qm", "dev self-commit"], cwd=str(self.repo))
+        self.assertIsNone(led.adopt_head_if_matches(step))
+
+    def test_revert_unclaimed_commits(self):
+        led = Ledger.load_or_start(self.cfg)
+        step = Step(id="1", goal="g", acceptance_criteria=["a"], verify=["true"])
+        step.base_sha = led.head_sha()
+        (self.repo / "sneaky.txt").write_text("out-of-band\n")
+        import subprocess as _sp
+        _sp.run(["git", "add", "-A"], cwd=str(self.repo))
+        _sp.run(["git", "commit", "-qm", "dev self-commit"], cwd=str(self.repo))
+        self.assertNotEqual(led.head_sha(), step.base_sha)
+        led.revert_unclaimed_commits(step, Plan(steps=[step]), "descope")
+        self.assertEqual(led.head_sha(), step.base_sha)   # branch rolled back
+        self.assertFalse((self.repo / "sneaky.txt").exists())
+        self.assertTrue(list((self.cfg.state_dir / "discarded").glob("**/reverted.diff")))
+
+    def test_dirty_tree_refused_without_run_branch(self):
+        r = make_repo()
+        import subprocess as _sp
+        _sp.run(["git", "init", "-q"], cwd=str(r))
+        _sp.run(["git", "add", "-A"], cwd=str(r))
+        _sp.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "b"], cwd=str(r))
+        (r / "app.txt").write_text("uncommitted\n")
+        with self.assertRaises(StateConflict):
+            Ledger.load_or_start(make_cfg(r, use_run_branch=False))
 
     def test_detached_head_records_sha(self):
         r = make_repo()
