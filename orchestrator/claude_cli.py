@@ -32,6 +32,7 @@ def run_claude(
     allowed_tools: Optional[str] = None,
     permission_mode: Optional[str] = None,
     resume_session: Optional[str] = None,
+    fork_session: bool = False,
     json_schema: Optional[dict] = None,
     add_dirs: Optional[Sequence[Path]] = None,
     max_turns: Optional[int] = None,
@@ -48,6 +49,8 @@ def run_claude(
         cmd += ["--permission-mode", permission_mode]
     if resume_session:
         cmd += ["--resume", resume_session]
+    if fork_session:
+        cmd += ["--fork-session"]
     if json_schema is not None:
         cmd += ["--json-schema", json.dumps(json_schema)]
     if max_turns:
@@ -55,7 +58,19 @@ def run_claude(
     for d in (add_dirs or []):
         cmd += ["--add-dir", str(d)]
 
-    proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout_s)
+    try:
+        proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        # A hung call is a retryable failure, not a run-ending crash.
+        return ClaudeResult(
+            ok=False,
+            text=f"[claude CLI timed out after {timeout_s}s]",
+            session_id=None,
+            cost_usd=0.0,
+            structured=None,
+            raw={"error": "timeout", "timeout_s": timeout_s},
+        )
+
     data = _parse_json(proc.stdout.strip())
 
     if data is None:
@@ -73,22 +88,30 @@ def run_claude(
     text = data.get("result") or data.get("content") or ""
     if not isinstance(text, str):
         text = json.dumps(text)
+    if is_error and proc.stderr:
+        text = f"{text}\n[stderr] {proc.stderr.strip()}" if text else proc.stderr.strip()
     session_id = data.get("session_id")
-    cost = float(data.get("total_cost_usd") or data.get("cost_usd") or 0.0)
+    try:
+        cost = float(data.get("total_cost_usd") or data.get("cost_usd") or 0.0)
+    except (TypeError, ValueError):
+        cost = 0.0
 
     # Structured output lands in `structured_output` on current CLIs; if your version
     # doesn't populate it, fall back to parsing the final message as JSON.
     structured = data.get("structured_output")
     if structured is None and json_schema is not None:
         structured = _parse_json(text)
+    if structured is not None and not isinstance(structured, dict):
+        structured = None  # all our schemas are objects; anything else is garbage
 
     return ClaudeResult(ok=not is_error, text=text, session_id=session_id,
                         cost_usd=cost, structured=structured, raw=data)
 
 
-def _parse_json(s: str):
+def _parse_json(s: str) -> Optional[dict]:
     """Parse `--output-format json`. Handles the single-object shape, the older
-    array shape (take last element), and a stream-json fallback (last parseable line)."""
+    array shape (take last dict element), and a stream-json fallback (last parseable
+    dict line). Only ever returns a dict — bare scalars/lists are not envelopes."""
     if not s:
         return None
     try:
@@ -99,10 +122,15 @@ def _parse_json(s: str):
             if not line:
                 continue
             try:
-                return json.loads(line)
+                parsed = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if isinstance(parsed, dict):
+                return parsed
         return None
     if isinstance(obj, list):
-        return obj[-1] if obj else None
-    return obj
+        for item in reversed(obj):
+            if isinstance(item, dict):
+                return item
+        return None
+    return obj if isinstance(obj, dict) else None
