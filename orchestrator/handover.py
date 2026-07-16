@@ -132,11 +132,11 @@ def build_handover(
                          "that names each flag and cites the specific diff evidence that clears it."]
 
     text = "\n".join(sections)
-    # Proof corpus = the actual content bodies only. Placeholders that appear when a
-    # section is empty are deliberately excluded so they can never be quoted as "evidence".
+    # Proof corpus = GROUND TRUTH only: the real git diff/stat and the orchestrator's gate
+    # transcript. The developer's self-reported summary is deliberately EXCLUDED — accept
+    # evidence must be quoted from what actually happened, not from the dev's own claims.
+    # Section placeholders are excluded so they can never be quoted as "evidence".
     corpus_parts = []
-    if dev_res is not None and (dev_res.structured or (dev_res.text or "").strip()):
-        corpus_parts.append(dev_summary)
     if diff["stat"]:
         corpus_parts.append(diff["stat"])
     if not diff["empty"]:

@@ -144,7 +144,14 @@ def _plan_phase(pm: PMSession, ledger: Ledger, cfg: Config) -> Plan:
 def _step_phase(pm: PMSession, step: Step, plan: Plan, ledger: Ledger, cfg: Config) -> Plan:
     print(f"→ Step {step.id}: {step.goal}")
     step.status = IN_PROGRESS
-    step.base_sha = ledger.head_sha()  # baseline for this attempt: detects out-of-band commits
+    # Baseline for detecting out-of-band commits. On a resume mid-crash-window, keep the
+    # marker's ORIGINAL base (the current HEAD already includes the crash commit, which would
+    # otherwise blind adoption and revert).
+    marker = ledger.state.get("pending_commit")
+    if marker and marker.get("step_id") == step.id and marker.get("base_sha"):
+        step.base_sha = marker["base_sha"]
+    else:
+        step.base_sha = ledger.head_sha()
     ledger.save_plan(plan)
 
     d = pm.dispatch_turn(step, plan)
@@ -191,7 +198,8 @@ def _step_phase(pm: PMSession, step: Step, plan: Plan, ledger: Ledger, cfg: Conf
                     adopted = ledger.adopt_head_if_matches(step)
                     if adopted:
                         step.status = DONE
-                        ledger.save_plan(plan)
+                        ledger.save_plan(plan)          # durably records the adoption...
+                        ledger.clear_pending_commit()   # ...then the marker is safe to drop
                         print(f"   ✓ accepted (work already committed as {adopted[:9]})\n")
                         return plan
                     allowed = [a for a in allowed if a != "accept"]

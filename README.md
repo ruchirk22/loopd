@@ -192,7 +192,9 @@ cryptographic guarantee:
   or state file tampered with between a stop and `--resume-run` is trusted on reload
   (resume validates the schema/version, not authenticity). If that matters for your threat
   model, run each step in a fresh container.
-- **Evidence proves the PM read the packet, not that the code is correct.** Accept
-  requires verbatim quotes from the diff/gate transcript per criterion; that stops
-  rubber-stamping, not a PM that genuinely misjudges. Deterministic gates remain the
-  arbiter of "done".
+- **Evidence proves the PM cited real ground truth, not that the code is correct.**
+  Accept requires verbatim quotes from the git diff / gate transcript (never the
+  developer's self-report), with every acceptance criterion covered. That forces the PM
+  to look at what actually happened and stops blind rubber-stamping — but it can't prove
+  each criterion is *semantically* met by its quote, and it won't catch a PM that
+  genuinely misjudges. Deterministic gates remain the arbiter of "done".

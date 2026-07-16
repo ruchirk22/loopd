@@ -160,7 +160,11 @@ class TestLedger(unittest.TestCase):
         # on the no-op re-accept, adoption recovers exactly this step's commit
         adopted = led.adopt_head_if_matches(step)
         self.assertEqual(adopted, committed)
-        self.assertIsNone(led.state["pending_commit"])  # cleared on adoption
+        # marker is NOT cleared by adopt itself (caller clears via clear_pending_commit
+        # only after save_plan) — preserves crash-safety ordering
+        self.assertIsNotNone(led.state["pending_commit"])
+        led.clear_pending_commit()
+        self.assertIsNone(led.state["pending_commit"])
 
     def test_adopt_refuses_without_marker(self):
         # a developer self-commit (no orchestrator marker) must NOT be adopted

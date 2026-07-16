@@ -8,6 +8,7 @@ the schemas, payload construction, and directive shape/evidence validation.
 """
 from __future__ import annotations
 
+import re
 from typing import List, Optional, Tuple
 
 from .claude_cli import run_claude
@@ -102,28 +103,40 @@ def _norm(s: str) -> str:
     return " ".join(s.split())
 
 
-# Boilerplate that proves nothing even if it appears in the proof corpus.
+# Boilerplate/framework chrome that proves nothing even if present in the proof corpus.
 _BANNED_EVIDENCE = {"all gates passed", "gates failed", "gate verdict", "ground truth",
                     "ok", "done", "pass", "passed", "tests pass", "it works",
                     "looks good", "lgtm", "correct", "verified", "n/a",
                     "no changes", "empty", "no gate output", "no developer output",
-                    "self-reported", "verify against the diff"}
+                    "self-reported", "verify against the diff",
+                    "test session starts", "collected", "rootdir", "platform"}
+_BANNED_RE = re.compile(r"^(=+|-+|\d+ passed.*|\d+ failed.*|collected \d+ items?.*)$")
 _MIN_QUOTE = 12
+_SCAFFOLD = ("###", "```", "diff --git", "index ", "@@", "[setup]", "[teardown]", "[ok]", "$ ")
 
 
-def _proof_haystack(corpus: str) -> str:
-    """Normalize the proof corpus for substring matching, dropping git/diff scaffolding
-    lines (headers, hunk markers, fences) that are structural rather than content."""
-    kept = []
+def _proof_lines(corpus: str):
+    """Yield (strict, loose) content lines: `strict` drops all scaffolding; `loose` also
+    keeps diff +/- body lines with their marker stripped, so a contiguous hunk copy still
+    matches its content."""
+    strict, loose = [], []
     for line in corpus.splitlines():
         s = line.strip()
-        if not s:
+        if not s or s.startswith(_SCAFFOLD):
             continue
-        if s.startswith(("###", "```", "diff --git", "index ", "@@", "+++ ", "--- ",
-                         "[setup]", "[teardown]", "[ok]", "$ ")):
+        if s.startswith(("+++ ", "--- ")):
             continue
-        kept.append(s)
-    return _norm("\n".join(kept))
+        if s[:1] in "+-" and not s.startswith(("+++", "---")):
+            loose.append(s[1:].strip())  # diff body content without the +/- marker
+            continue
+        strict.append(s)
+        loose.append(s)
+    return strict, loose
+
+
+def _proof_haystack(corpus: str):
+    strict, loose = _proof_lines(corpus)
+    return _norm("\n".join(strict)), _norm("\n".join(loose)), {_norm(l) for l in loose if l}
 
 
 def _match_criterion(quoted: str, criteria: List[str], covered: set) -> Optional[int]:
@@ -150,9 +163,8 @@ def verify_evidence(directive: dict, step: Step, proof_corpus: str) -> List[str]
     problems = []
     criteria = [c for c in step.acceptance_criteria if c.strip()]
     evidence = directive.get("criteria_evidence") or []
-    hay = _proof_haystack(proof_corpus)
+    strict_hay, loose_hay, lines = _proof_haystack(proof_corpus)
     covered: set = set()
-    seen_quotes = set()
 
     for i, e in enumerate(evidence):
         label = f"evidence entry {i + 1}"
@@ -160,20 +172,20 @@ def verify_evidence(directive: dict, step: Step, proof_corpus: str) -> List[str]
             problems.append(f"{label}: criterion marked unsatisfied — you cannot accept; reject or replan instead")
             continue
         quote = _norm(str(e.get("evidence", "")))
+        # Strip diff/hunk scaffolding a PM may have copied along with real content.
+        quote = _norm(re.sub(r"@@[^@]*@@|^[+-](?![+-])", " ", quote))
         if not quote:
             problems.append(f"{label}: empty evidence — quote the exact text from the diff or gate transcript that proves it")
             continue
-        if quote.lower() in _BANNED_EVIDENCE:
+        if quote.lower() in _BANNED_EVIDENCE or _BANNED_RE.match(quote.lower()):
             problems.append(f"{label}: {quote!r} is boilerplate/scaffolding, not proof — quote specific diff/output text")
             continue
-        if len(quote) < _MIN_QUOTE:
-            problems.append(f"{label}: evidence {quote!r} is too short to verify — quote at least {_MIN_QUOTE} characters verbatim from the packet")
+        # A quote shorter than the floor is allowed ONLY if it is a whole content line
+        # (e.g. `HTTP 200`) — real lines are self-guarding against boilerplate.
+        if len(quote) < _MIN_QUOTE and quote not in lines:
+            problems.append(f"{label}: evidence {quote!r} is too short to verify — quote a full line or ≥{_MIN_QUOTE} chars verbatim")
             continue
-        if quote in seen_quotes:
-            problems.append(f"{label}: the same quote is reused for multiple criteria — cite distinct evidence per criterion")
-            continue
-        seen_quotes.add(quote)
-        if quote not in hay:
+        if quote not in strict_hay and quote not in loose_hay:
             problems.append(f"{label}: not an exact quote from the handover's proof sections: {quote[:120]!r}")
             continue
         idx = _match_criterion(str(e.get("criterion", "")), criteria, covered)

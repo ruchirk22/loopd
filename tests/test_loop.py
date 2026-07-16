@@ -62,18 +62,21 @@ DISPATCH = {"verdict": "dispatch", "reasoning": "go",
 DISPATCH_WORLD = {"verdict": "dispatch", "reasoning": "go",
                   "next_prompt": "Create world.txt containing world", "dev_session": "fresh"}
 
+# Distinctive file content so accept-evidence can quote a real DIFF line (the dev's own
+# summary is excluded from the proof corpus).
+HELLO_CONTENT = "health endpoint returns status ok\n"
+
 # verify commands reference hello.txt, which the dev creates -> GATE_TARGETS_TOUCHED
-# fires (high_risk), so a valid accept must also carry integrity_ack. Evidence quotes
-# the dev summary verbatim.
+# fires (high_risk), so a valid accept must also carry integrity_ack.
 ACCEPT = {"verdict": "accept", "reasoning": "diff shows the file; gates green",
           "commit_message": "step 1: hello",
           "integrity_ack": "GATE_TARGETS_TOUCHED: hello.txt is the deliverable itself; the diff "
                            "shows its real content, the check was not gamed.",
           "criteria_evidence": [{"criterion": "hello.txt exists", "satisfied": True,
-                                 "evidence": "created hello.txt with the required content"}]}
+                                 "evidence": "health endpoint returns status ok"}]}
 
 
-def dev_writes_hello(content="hello\n"):
+def dev_writes_hello(content=HELLO_CONTENT):
     def responder(prompt, cwd, kw):
         (cwd / "hello.txt").write_text(content)
         return ok_result({"summary": "created hello.txt with the required content",
@@ -189,8 +192,8 @@ class TestRejectThenAcceptWithCheckpoint(LoopTestBase):
                 ("All planned steps are accepted", finalize_expect_seed),
             ],
             dev_script=[
-                (None, dev_writes_hello("junk\n")),
-                ("Put the word hello inside", dev_writes_hello("hello\n")),
+                (None, dev_writes_hello("junk placeholder\n")),
+                ("Put the word hello inside", dev_writes_hello()),
             ],
         )
         rc = loop.run(None, self.cfg)
@@ -273,10 +276,10 @@ class TestFinalizeNoOpReplan(LoopTestBase):
                         "commit_message": "step 2",
                         "integrity_ack": "GATE_TARGETS_TOUCHED: world.txt is the deliverable; diff is real.",
                         "criteria_evidence": [{"criterion": "world.txt exists", "satisfied": True,
-                                               "evidence": "created world.txt as the deliverable"}]}
+                                               "evidence": "world data payload written here"}]}
 
         def dev_world(prompt, cwd, kw):
-            (cwd / "world.txt").write_text("world\n")
+            (cwd / "world.txt").write_text("world data payload written here\n")
             return ok_result({"summary": "created world.txt as the deliverable",
                               "files_changed": ["world.txt"], "commands_run": ["test -f world.txt"],
                               "concerns": []}, "dev-1")

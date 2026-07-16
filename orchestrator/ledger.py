@@ -239,8 +239,8 @@ class Ledger:
         if plan and sha in {s.commit_sha for s in plan.steps}:
             return None
         step.commit_sha = sha
-        self.state["pending_commit"] = None
-        self._save()
+        # Do NOT clear the marker here — the caller clears it via clear_pending_commit()
+        # only AFTER save_plan durably records the adoption, preserving crash-safety.
         self.log({"event": "step_adopted_head", "step": step.id, "sha": sha})
         return sha
 

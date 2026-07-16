@@ -11,11 +11,9 @@ from dataclasses import dataclass, field, asdict
 from typing import List, Optional
 
 # Executables that, on their own, verify nothing (regardless of args).
-_NOOP_CMDS = {"true", ":", "false", "echo", "printf", "sleep", "pwd", "cat", "ls",
-              "cd", "export", "exit", "read", ""}
-# `test`/`[` forms that are constant-true.
-_ALWAYS_TRUE_TEST = {"1", "true", "-d .", "-e .", "-d ./", "-f .", "1 -eq 1",
-                     "0 -eq 0", "-n x", "x = x"}
+_NOOP_CMDS = {"true", ":", "echo", "printf", "sleep", "pwd", "export", "tee", ""}
+# `test`/`[` forms that are constant-true regardless of args.
+_ALWAYS_TRUE_TEST = {"1", "true", "-d .", "-e .", "-d ./", "-f .", "-n x"}
 
 PENDING, IN_PROGRESS, DONE, SKIPPED = "pending", "in_progress", "done", "skipped"
 
@@ -28,7 +26,12 @@ class PlanValidationError(ValueError):
 
 # Tri-state exit classification: always exits 0, always non-zero, or runtime-dependent.
 ZERO, NONZERO, DEPENDS = "zero", "nonzero", "depends"
+# Commands that verify nothing when used as the exit-status source. `tee` is here because a
+# pipeline's exit is its last stage (pipefail off) and `… | tee log` masks the real status.
 _WRAPPERS = {"env", "command", "nohup", "time", "exec", "stdbuf", "builtin", "eval"}
+# ZERO only with NO path operand (bare `ls`/`cat`/`cd`) — with a path they're real existence
+# checks that exit non-zero on a missing target, so `ls dist/app.js` must NOT be flagged.
+_COND_NOOP = {"ls", "cat", "cd"}
 _KEYWORDS = {"if", "then", "elif", "else", "fi", "while", "until", "for", "do", "done",
              "case", "esac", "in", "select", "function", ";;"}
 
@@ -68,11 +71,41 @@ def _atom_class(clause: str) -> str:
         return ZERO if (len(toks) == 1 or toks[1] == "0") else NONZERO
     if exe in _NOOP_CMDS:
         return ZERO
+    if exe in _COND_NOOP:
+        # ZERO only with no path operand; with a path it's a real existence check.
+        operands = [t for t in toks[1:] if not t.startswith("-")]
+        return ZERO if not operands else DEPENDS
     if exe in ("test", "["):
-        rest = " ".join(t for t in toks[1:] if t != "]").strip()
-        return ZERO if rest in _ALWAYS_TRUE_TEST else DEPENDS
+        rest = [t for t in toks[1:] if t != "]"]
+        return _test_class(rest)
     if exe in _KEYWORDS:
         return DEPENDS  # compound construct handled by the keyword heuristic below
+    return DEPENDS
+
+
+def _is_literal(tok: str) -> bool:
+    return bool(tok) and "$" not in tok and "`" not in tok and "*" not in tok and "?" not in tok
+
+
+def _test_class(args: List[str]) -> str:
+    """Classify a `test`/`[` expression that uses only literals as constant true/false."""
+    rest = " ".join(args).strip()
+    if rest in _ALWAYS_TRUE_TEST:
+        return ZERO
+    if len(args) == 3 and _is_literal(args[0]) and _is_literal(args[2]):
+        a, op, b = args
+        if op in ("=", "=="):
+            return ZERO if a == b else NONZERO
+        if op == "!=":
+            return NONZERO if a == b else ZERO
+        if op in ("-eq", "-ne", "-lt", "-le", "-gt", "-ge"):
+            try:
+                x, y = int(a), int(b)
+            except ValueError:
+                return DEPENDS
+            res = {"-eq": x == y, "-ne": x != y, "-lt": x < y,
+                   "-le": x <= y, "-gt": x > y, "-ge": x >= y}[op]
+            return ZERO if res else NONZERO
     return DEPENDS
 
 
@@ -348,13 +381,16 @@ def apply_mutations(plan: Plan, ops: List[dict]) -> Plan:
             if target.status in (DONE, SKIPPED):
                 problems.append(f"update: step {target.id!r} is {target.status} and immutable")
                 continue
-            def _norm_fields(s: Step) -> tuple:
-                # whitespace-insensitive; only SUBSTANTIVE fields count toward materiality
+            def _all_fields(s: Step) -> tuple:
                 return (" ".join(s.goal.split()),
                         tuple(" ".join(c.split()) for c in s.acceptance_criteria),
                         tuple(" ".join(v.split()) for v in s.verify))
 
-            before = _norm_fields(target)
+            def _exec_fields(s: Step) -> tuple:
+                # the bar the developer must actually clear: goal + verify commands
+                return (" ".join(s.goal.split()), tuple(" ".join(v.split()) for v in s.verify))
+
+            all_before, exec_before = _all_fields(target), _exec_fields(target)
             for key in ("goal", "details"):
                 if key in patch and patch[key] is not None:
                     setattr(target, key, str(patch[key]))
@@ -364,13 +400,15 @@ def apply_mutations(plan: Plan, ops: List[dict]) -> Plan:
                     if isinstance(val, str):
                         val = [val]
                     setattr(target, key, [str(v) for v in val])
-            if _norm_fields(target) == before:
+            if _all_fields(target) == all_before:
                 problems.append(f"update: step {target.id!r} does not change goal, acceptance "
                                 "criteria, or verify — a cosmetic edit cannot reset the retry caps")
                 continue
-            # only a MATERIALLY changed step earns a clean retry slate
-            target.attempts = 0
-            target.rejections = 0
+            # A clean retry slate only when the EXECUTED bar (goal/verify) changed — editing
+            # acceptance_criteria alone is allowed but must not launder the retry caps.
+            if _exec_fields(target) != exec_before:
+                target.attempts = 0
+                target.rejections = 0
         elif kind == "remove":
             sid = str((op.get("step") or {}).get("id") or op.get("step_id") or "")
             target = new.get(sid)

@@ -122,14 +122,14 @@ class TestEvidence(unittest.TestCase):
         probs = verify_evidence(d, step(), HANDOVER)
         self.assertTrue(any("too short" in p for p in probs))
 
-    def test_duplicate_quote_rejected(self):
+    def test_same_quote_may_cover_distinct_criteria(self):
+        # a one-line change can legitimately satisfy two criteria derived from that line
         q = "test_health.py passed 1 test in 0.2s"
         d = {"criteria_evidence": [
             {"criterion": "endpoint returns 200", "satisfied": True, "evidence": q},
             {"criterion": "test added", "satisfied": True, "evidence": q},
         ]}
-        probs = verify_evidence(d, step(), HANDOVER)
-        self.assertTrue(any("reused" in p for p in probs))
+        self.assertEqual(verify_evidence(d, step(), HANDOVER), [])
 
     def test_unmatched_criterion_rejected(self):
         d = {"criteria_evidence": [

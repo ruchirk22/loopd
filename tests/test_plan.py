@@ -18,10 +18,12 @@ def step_dict(sid="1", **kw):
 class TestTrivialCommands(unittest.TestCase):
     def test_trivial(self):
         for cmd in ["true", ":", "exit 0", "echo ok", "echo done  ", "printf hi",
-                    "sleep 5", "timeout=60;true", "ls", "pwd", "cat README.md",
-                    "test -d .", "test 1 -eq 1", "/usr/bin/true", "# verified manually",
+                    "sleep 5", "timeout=60;true", "ls", "pwd",
+                    "test -d .", "test 1 -eq 1", "test 1 = 1", "test 0 = 0", "[ 1 = 1 ]",
+                    "/usr/bin/true", "# verified manually",
                     "true || pytest", "pytest || true", "echo x && true",
                     "sleep 1 && true", "pytest ; true", "make check || echo skipped",
+                    "pytest | tee log", "npm test | tee out.log",
                     # exotic always-exit-0 bypasses the tri-state evaluator must catch:
                     "(true)", "( exit 0 )", "{ true; }", "! false", "env true",
                     "command true", "FOO=1 true", "pytest &", "if true; then :; fi"]:
@@ -32,6 +34,9 @@ class TestTrivialCommands(unittest.TestCase):
                     "test -f out.txt && echo ok", "python3 -m orchestrator.probe port --port 80",
                     "timeout=900;npm run build", "true ; pytest -q", "npm ci && npm test",
                     "test -f out.txt",
+                    # existence checks with a path operand are REAL checks, not no-ops:
+                    "ls dist/bundle.js", "cat README.md", "ls -la build/artifact.tar",
+                    "test 1 = 2", "test 3 -eq 4",
                     # genuine checks using fail-on-error idioms MUST NOT be rejected:
                     "pytest || exit 1", "test -f dist/app.js || exit 1", "pytest || false",
                     "set -e; npm ci; npm test; echo OK", "! test -f forbidden.txt",
