@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 .agentic/
 .DS_Store
+benchmarks/results/
