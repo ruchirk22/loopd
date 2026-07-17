@@ -46,8 +46,10 @@ orchestrator/
   ledger.py     durable resumable state, budget kill switch, git commits + worktrees
   seed.py       context seeding: brief.md from /handoff, --brief, --seed-session, or task
   loop.py       the control plane enforcing all of the above
+  env.py        tiny stdlib .env loader (so you never have to `export`)
 prompts/        pm_system.md · dev_system.md
 commands/       handoff.md — the /handoff slash command for your interactive sessions
+benchmarks/     loop-vs-raw-agent harness + task suite (see benchmarks/README.md)
 run.py          entrypoint
 Dockerfile      the sandbox (non-root — required for bypassPermissions)
 tests/          unit + scripted end-to-end tests (stdlib unittest, no network)
@@ -58,8 +60,15 @@ tests/          unit + scripted end-to-end tests (stdlib unittest, no network)
 - **Python 3.10+** (standard library only — no pip installs).
 - **git** on PATH.
 - **Claude Code CLI**: `npm install -g @anthropic-ai/claude-code` (verified on 2.1.205).
-- Auth: `export ANTHROPIC_API_KEY=sk-ant-...` (billed as API usage), or
-  `claude setup-token` → `export CLAUDE_CODE_OAUTH_TOKEN=...` to use a Pro/Max plan.
+- **Auth** — copy the env template and drop your token in (loaded automatically, no
+  `export` needed):
+
+  ```bash
+  cp .env.example .env      # then edit .env: set ANTHROPIC_API_KEY=sk-ant-...
+  ```
+
+  `.env` is git-ignored. Alternatively use a Pro/Max subscription: `claude setup-token`
+  and put the token in `.env` as `CLAUDE_CODE_OAUTH_TOKEN`.
 
 ## Seeding: getting your context into the PM
 
@@ -80,8 +89,9 @@ context over — don't retype it:
 
 ## Run it
 
+With your token in `.env` (see Prerequisites), just run — no `export` needed:
+
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
 python run.py --repo ../my-app --budget 25            # picks up .agentic/brief.md
 python run.py "Add a /health endpoint with a passing test" --repo ../my-service
 python run.py --resume-run --repo ../my-app           # continue an interrupted run
@@ -95,7 +105,7 @@ container for anything real:
 
 ```bash
 docker build -t agentic-loop .
-docker run --rm -e ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY \
+docker run --rm --env-file .env \
   -v "$(pwd)/../my-app:/work" agentic-loop --budget 25
 ```
 

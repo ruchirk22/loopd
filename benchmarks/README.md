@@ -13,9 +13,10 @@ arm can pass by writing weak tests. Per run we record success, `cost_usd`, wall 
 
 ## Run it
 
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...     # or CLAUDE_CODE_OAUTH_TOKEN
+Put your token in `.env` at the repo root (`cp .env.example .env`) — it's loaded
+automatically for both arms; no `export` needed.
 
+```bash
 # cheap first pass on Haiku (both arms), 3 reps per task:
 python3 benchmarks/run_benchmark.py --model haiku --repeat 3 --budget 3
 

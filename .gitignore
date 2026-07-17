@@ -1,5 +1,13 @@
+# Secrets — never commit your real token
+.env
+
+# Python
 __pycache__/
 *.pyc
+
+# Orchestrator run state (lives inside target repos) and benchmark outputs
 .agentic/
-.DS_Store
 benchmarks/results/
+
+# macOS
+.DS_Store

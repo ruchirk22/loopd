@@ -37,6 +37,11 @@ REPO_ROOT = ROOT.parent
 TASKS_DIR = ROOT / "tasks"
 RESULTS_DIR = ROOT / "results"
 
+sys.path.insert(0, str(REPO_ROOT))
+from orchestrator.env import load_dotenv  # noqa: E402
+
+load_dotenv()  # so both arms inherit ANTHROPIC_API_KEY from .env, no export needed
+
 
 def discover_tasks() -> list[str]:
     return sorted(p.name for p in TASKS_DIR.iterdir()

@@ -16,11 +16,13 @@ import sys
 from pathlib import Path
 
 from orchestrator.config import Config
+from orchestrator.env import load_dotenv
 from orchestrator.ledger import StateConflict
 from orchestrator.loop import run
 
 
 def main() -> None:
+    load_dotenv()  # pick up ANTHROPIC_API_KEY / model / budget overrides from .env
     ap = argparse.ArgumentParser(
         description="Self-hosted PM+Developer agentic loop on Claude Code (headless).")
     ap.add_argument("task", nargs="?", default=None,
