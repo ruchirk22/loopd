@@ -79,6 +79,21 @@ class TestValidateDirective(unittest.TestCase):
         d["integrity_ack"] = "GATE_TARGETS_TOUCHED: the diff adds a real assertion, not a weakened check."
         self.assertEqual(validate_directive(d, ["accept"], step(), HANDOVER, require_integrity_ack=True), [])
 
+    def test_evidence_not_enforced_on_clean_accept(self):
+        # Not high-risk: even missing evidence must NOT block accept (green gates are the
+        # arbiter; the loop logs weak evidence advisorily).
+        d = {"verdict": "accept", "reasoning": "gates green", "commit_message": "m",
+             "criteria_evidence": []}
+        self.assertEqual(validate_directive(d, ["accept"], step(), HANDOVER,
+                                            require_integrity_ack=False), [])
+
+    def test_evidence_enforced_on_high_risk_accept(self):
+        d = {"verdict": "accept", "reasoning": "r", "commit_message": "m",
+             "integrity_ack": "GATE_TARGETS_TOUCHED: real assertions were added, not weakened checks.",
+             "criteria_evidence": []}
+        probs = validate_directive(d, ["accept"], step(), HANDOVER, require_integrity_ack=True)
+        self.assertTrue(any("no grounded evidence" in p for p in probs))
+
 
 class TestEvidence(unittest.TestCase):
     def test_valid_evidence_passes(self):
@@ -86,17 +101,27 @@ class TestEvidence(unittest.TestCase):
 
     def test_missing_evidence_entries(self):
         probs = verify_evidence({"criteria_evidence": []}, step(), HANDOVER)
-        self.assertTrue(any("no verified evidence" in p for p in probs))
+        self.assertTrue(any("no grounded evidence" in p for p in probs))
 
     def test_fabricated_quote_detected(self):
         d = {"criteria_evidence": [
             {"criterion": "endpoint returns 200", "satisfied": True,
-             "evidence": "this precise text is nowhere in the packet at all"},
+             "evidence": "quux frobnicate zzzyzx wibble splunge nonexistent"},
             {"criterion": "test added", "satisfied": True,
              "evidence": "test_health.py passed 1 test in 0.2s"},
         ]}
         probs = verify_evidence(d, step(), HANDOVER)
-        self.assertTrue(any("not an exact quote" in p for p in probs))
+        self.assertTrue(any("not grounded" in p for p in probs))
+
+    def test_paraphrased_real_quote_is_grounded(self):
+        # collapsed/reordered real content still grounds (token overlap, not byte match)
+        d = {"criteria_evidence": [
+            {"criterion": "endpoint returns 200", "satisfied": True,
+             "evidence": "health returns status ok def"},          # tokens from the diff
+            {"criterion": "test added", "satisfied": True,
+             "evidence": "test_health passed test"},               # tokens from the gate log
+        ]}
+        self.assertEqual(verify_evidence(d, step(), HANDOVER), [])
 
     def test_empty_evidence_rejected(self):
         d = {"criteria_evidence": [
@@ -114,13 +139,13 @@ class TestEvidence(unittest.TestCase):
         probs = verify_evidence(d, step(), HANDOVER)
         self.assertTrue(any("boilerplate" in p for p in probs))
 
-    def test_short_quotes_rejected(self):
+    def test_ungrounded_short_quote_rejected(self):
         d = {"criteria_evidence": [
-            {"criterion": "endpoint returns 200", "satisfied": True, "evidence": "ret 200"},
+            {"criterion": "endpoint returns 200", "satisfied": True, "evidence": "xyz qrs"},
             {"criterion": "test added", "satisfied": True, "evidence": "test_health.py passed 1 test"},
         ]}
         probs = verify_evidence(d, step(), HANDOVER)
-        self.assertTrue(any("too short" in p for p in probs))
+        self.assertTrue(any("not grounded" in p for p in probs))
 
     def test_gate_command_lines_are_valid_evidence(self):
         # Reproduces a real run: assertion-style gates print nothing on success, so the

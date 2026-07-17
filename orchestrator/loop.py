@@ -22,7 +22,7 @@ from .handover import Handover, build_handover
 from .ledger import BudgetExceeded, GitError, Ledger, NoChangesError
 from .plan import (DONE, IN_PROGRESS, SKIPPED, Plan, PlanValidationError, Step,
                    apply_mutations)
-from .pm import PMSession, PMTurnError, validate_directive
+from .pm import PMSession, PMTurnError, validate_directive, verify_evidence
 from . import seed
 
 
@@ -188,6 +188,13 @@ def _step_phase(pm: PMSession, step: Step, plan: Plan, ledger: Ledger, cfg: Conf
         while True:  # resolve the verdict for THIS handover
             v = d["verdict"]
             if v == "accept":
+                # On a clean (non-high-risk) accept, evidence wasn't hard-enforced; still
+                # record any weak citation to the audit trail without blocking the run —
+                # the green gate already verified the work.
+                if not ho.high_risk:
+                    ev = verify_evidence(d, step, ho.evidence_corpus)
+                    if ev:
+                        ledger.log({"event": "weak_evidence", "step": step.id, "notes": ev[:5]})
                 step.dev_summary = (ho.dev_summary or "")[:2000]
                 try:
                     sha = ledger.commit_step(step, d.get("commit_message", ""))

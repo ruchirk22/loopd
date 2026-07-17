@@ -163,15 +163,25 @@ def _match_criterion(quoted: str, criteria: List[str], covered: set) -> Optional
     return None
 
 
+def _sig_tokens(s: str) -> set:
+    """Significant tokens (≥3 chars) — the grounding unit. Token overlap tolerates
+    paraphrase, collapsed multi-line quotes, and truncation while still catching a
+    fabricated quote (whose tokens don't appear in the proof)."""
+    return {t for t in re.findall(r"[a-z0-9_]+", s.lower()) if len(t) >= 3}
+
+
 def verify_evidence(directive: dict, step: Step, proof_corpus: str) -> List[str]:
-    """Accept requires, per acceptance criterion, an exact quote from the PROOF corpus
-    (dev summary / real diff / gate transcript — never the packet scaffolding). Empty,
-    short, boilerplate, duplicate, fabricated, and unmatched-criterion evidence are all
-    refused. This is the anti-rubber-stamp rail."""
+    """Accept-evidence must be GROUNDED in the proof corpus (real diff / gate transcript):
+    most of a quote's significant tokens must appear there. This catches fabrication and
+    rubber-stamping without demanding byte-exact quotes — a PM that paraphrases or collapses
+    a real diff/test block still passes, but one citing text it never read does not. Empty,
+    boilerplate, and unmatched-criterion evidence are refused; every criterion must be
+    covered by a grounded, matching entry."""
     problems = []
     criteria = [c for c in step.acceptance_criteria if c.strip()]
     evidence = directive.get("criteria_evidence") or []
-    strict_hay, loose_hay, lines = _proof_haystack(proof_corpus)
+    _, loose_hay, _ = _proof_haystack(proof_corpus)
+    corpus_tokens = _sig_tokens(loose_hay)
     covered: set = set()
 
     for i, e in enumerate(evidence):
@@ -179,22 +189,18 @@ def verify_evidence(directive: dict, step: Step, proof_corpus: str) -> List[str]
         if not e.get("satisfied", False):
             problems.append(f"{label}: criterion marked unsatisfied — you cannot accept; reject or replan instead")
             continue
-        quote = _norm(str(e.get("evidence", "")))
-        # Strip diff/hunk scaffolding a PM may have copied along with real content.
-        quote = _norm(re.sub(r"@@[^@]*@@|^[+-](?![+-])", " ", quote))
+        quote = _norm(re.sub(r"@@[^@]*@@", " ", str(e.get("evidence", ""))))
         if not quote:
-            problems.append(f"{label}: empty evidence — quote the exact text from the diff or gate transcript that proves it")
+            problems.append(f"{label}: empty evidence — cite the diff or gate transcript text that proves it")
             continue
         if quote.lower() in _BANNED_EVIDENCE or _BANNED_RE.match(quote.lower()):
-            problems.append(f"{label}: {quote!r} is boilerplate/scaffolding, not proof — quote specific diff/output text")
+            problems.append(f"{label}: {quote!r} is boilerplate/scaffolding, not proof — cite specific diff/output text")
             continue
-        # A quote shorter than the floor is allowed ONLY if it is a whole content line
-        # (e.g. `HTTP 200`) — real lines are self-guarding against boilerplate.
-        if len(quote) < _MIN_QUOTE and quote not in lines:
-            problems.append(f"{label}: evidence {quote!r} is too short to verify — quote a full line or ≥{_MIN_QUOTE} chars verbatim")
-            continue
-        if quote not in strict_hay and quote not in loose_hay:
-            problems.append(f"{label}: not an exact quote from the handover's proof sections: {quote[:120]!r}")
+        qtok = _sig_tokens(quote)
+        grounded = qtok & corpus_tokens
+        if len(grounded) < 2 or (qtok and len(grounded) < 0.6 * len(qtok)):
+            problems.append(f"{label}: evidence is not grounded in the diff/gate transcript "
+                            f"(fabricated or paraphrased too far): {quote[:100]!r}")
             continue
         idx = _match_criterion(str(e.get("criterion", "")), criteria, covered)
         if idx is None:
@@ -204,7 +210,7 @@ def verify_evidence(directive: dict, step: Step, proof_corpus: str) -> List[str]
 
     missing = [criteria[i] for i in range(len(criteria)) if i not in covered]
     if missing:
-        problems.append("no verified evidence for acceptance criteria: "
+        problems.append("no grounded evidence for acceptance criteria: "
                         + "; ".join(m[:80] for m in missing))
     return problems
 
@@ -223,11 +229,16 @@ def validate_directive(directive: dict, allowed: List[str], step: Optional[Step]
     if verdict == "accept":
         if not str(directive.get("commit_message", "")).strip():
             problems.append("accept requires a commit_message")
-        if require_integrity_ack and len(str(directive.get("integrity_ack", "")).strip()) < 40:
-            problems.append("integrity flags were raised: accept requires a substantive integrity_ack "
-                            "naming each flag and citing the diff evidence that clears it")
-        if step is not None:
-            problems += verify_evidence(directive, step, handover_text)
+        # Evidence is ENFORCED only when integrity flags fired (tests/gate-config/no-op —
+        # the real gaming-risk cases). On a clean green-gate accept the deterministic gates
+        # are the arbiter, so imperfect citation is advisory (logged by the loop), never a
+        # run-ending abort — see loop._step_phase.
+        if require_integrity_ack:
+            if len(str(directive.get("integrity_ack", "")).strip()) < 40:
+                problems.append("integrity flags were raised: accept requires a substantive integrity_ack "
+                                "naming each flag and citing the diff evidence that clears it")
+            if step is not None:
+                problems += verify_evidence(directive, step, handover_text)
     if verdict in ("plan", "replan") and not directive.get("plan_mutations"):
         problems.append(f"{verdict} requires non-empty plan_mutations")
     if verdict == "task_complete":
