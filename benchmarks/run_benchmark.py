@@ -48,6 +48,27 @@ def discover_tasks() -> list[str]:
                   if p.is_dir() and (p / "spec.md").exists() and (p / "check.py").exists())
 
 
+def preflight(model: str, timeout_s: int) -> tuple[bool, str]:
+    """One tiny call to confirm auth + model access, so a misconfig fails loudly instead of
+    producing a misleading all-zero table (every run erroring at $0 = auth, not task failure)."""
+    try:
+        p = subprocess.run(["claude", "-p", "reply with: ok", "--model", model,
+                            "--output-format", "json"],
+                           capture_output=True, text=True, errors="replace",
+                           timeout=min(120, timeout_s))
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return False, str(e)
+    try:
+        d = json.loads(p.stdout)
+        if isinstance(d, list):
+            d = next((x for x in reversed(d) if isinstance(x, dict)), {})
+    except (json.JSONDecodeError, TypeError):
+        d = {}
+    if p.returncode != 0 or d.get("is_error"):
+        return False, ((p.stderr or p.stdout or f"exit {p.returncode}").strip()[:400])
+    return True, ""
+
+
 def run_check(task: str, workdir: Path) -> tuple[bool, str]:
     """The independent objective check — ground truth for success."""
     check = TASKS_DIR / task / "check.py"
@@ -129,6 +150,7 @@ def main() -> int:
     ap.add_argument("--budget", type=float, default=5.0, help="per-loop-run USD budget")
     ap.add_argument("--timeout", type=int, default=1200, help="per-run timeout (s)")
     ap.add_argument("--baseline-max-turns", type=int, default=60)
+    ap.add_argument("--no-preflight", action="store_true", help="skip the auth/model smoke check")
     ap.add_argument("--list", action="store_true", help="list tasks and exit")
     args = ap.parse_args()
 
@@ -142,6 +164,19 @@ def main() -> int:
         print(f"Unknown task(s): {unknown}. Available: {all_tasks}", file=sys.stderr)
         return 2
     arms = [a.strip() for a in args.arms.split(",") if a.strip()]
+
+    if not args.no_preflight:
+        print(f"[preflight] checking auth + model access for {args.model}…", flush=True)
+        ok, why = preflight(args.model, args.timeout)
+        if not ok:
+            print(f"\nPREFLIGHT FAILED — `claude -p --model {args.model}` did not run:\n  {why}\n\n"
+                  "This is an auth/model problem, not a benchmark result. Fix before running:\n"
+                  "  • .env must have a WORKING ANTHROPIC_API_KEY *or* CLAUDE_CODE_OAUTH_TOKEN\n"
+                  "    (if both are set the API key wins — comment out an unused `sk-ant-...` placeholder)\n"
+                  "  • confirm your account/plan can use this --model\n"
+                  "Re-run with --no-preflight to bypass this check.", file=sys.stderr)
+            return 2
+        print("[preflight] ok\n", flush=True)
 
     stamp = time.strftime("%Y%m%d-%H%M%S")
     out_dir = RESULTS_DIR / stamp
