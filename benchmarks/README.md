@@ -41,6 +41,10 @@ or more so success rates and costs mean something.
 - **Fair baseline.** `claude -p` runs the full headless agent to completion (many turns);
   it's the honest "Claude Code, used autonomously" comparison, just without our scaffolding.
 - **Cost** comes from the CLI JSON envelope (baseline) and `.agentic/state.json` (loop).
+- **Interpret honestly.** On easy tasks both arms pass, so loopd shows equal success at
+  higher cost — expected. loopd's value shows on tasks where a raw agent silently fails
+  verification, so use a task set that actually discriminates and always report cost/time
+  next to success. Publish a committed run in [RESULTS.md](RESULTS.md).
 
 ## Add a task
 
