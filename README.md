@@ -1,9 +1,32 @@
-# agentic-loop
+# loopd
 
-A **self-hosted PM + Developer agentic loop** built on Claude Code's headless mode —
-the *PM-Sovereign* design: ONE persistent PM session (Opus 4.8) plans, authors every
-developer prompt verbatim, reviews every handover, and decides what happens next;
-a Python orchestrator relays its directives under hard rails it alone controls.
+An autonomous coding loop that only ships changes it can prove. A persistent planner
+directs disposable developer sessions, and every step is verified by deterministic checks
+*outside* the model before it is committed.
+
+Built on [Claude Code](https://docs.claude.com/en/docs/claude-code)'s headless mode.
+
+## Why loopd?
+
+Coding agents are good at writing code and bad at knowing when they are done. Left
+unattended, one will declare success on work that doesn't build, quietly weaken a test to
+make it pass, or drift off the task. So you supervise it: read the plan, hand it steps, run
+the tests yourself, review each diff, and decide what is actually finished.
+
+loopd automates that supervision — without trusting the model to grade its own work.
+
+- A **planner** breaks the task into small steps and reviews every result.
+- A **developer** implements one step at a time.
+- A **verification layer** — ordinary shell commands, run by the orchestrator, not the
+  agent — decides whether a step actually passed.
+
+A model can *propose* that something is done. It cannot *declare* it done. When the step's
+checks are red, "accept" isn't even an option the planner is allowed to choose. The payoff
+is an agent you can start and walk away from: it runs to completion, commits one reviewable
+change per step, and stops with a clear report if it can't succeed — instead of confidently
+handing back broken work.
+
+## Architecture
 
 ```
 your interactive Claude Code session
@@ -12,199 +35,141 @@ your interactive Claude Code session
 .agentic/brief.md
         │
         ▼
-┌─ PM session · claude-opus-4-8 · resumed every turn ────────────────────────┐
+┌─ Planner · persistent session · resumed every turn ────────────────────────┐
 │  plan → author dev prompt → review handover → directive:                   │
 │  accept | reject+feedback | replan | descope | task_complete | abort       │
 └──────┬───────────────────────────────────────────────▲─────────────────────┘
        │ next_prompt (verbatim)                        │ handover packet:
-       ▼                                               │  dev summary (schema'd)
-┌─ Dev session · opus-4-8 · bypassPermissions ──────┐  │  + real git diff
-│  implement → inner retry loop vs gates (no PM     │──┘  + gate transcript
-│  turn until green or attempts exhausted)          │     + integrity flags
+       ▼                                               │  dev summary
+┌─ Developer · disposable session · sandboxed ──────┐  │  + real git diff
+│  implement → inner retry loop vs gates (no        │──┘  + gate transcript
+│  planner turn until green or attempts exhausted)  │     + integrity flags
 └───────────────────────────────────────────────────┘
-       Python rails: gates run HERE · accept needs green gates + real diff +
-       quoted evidence · task_complete ⇒ final verify + regression sweep in a
-       PRISTINE worktree · budget/attempt/rejection/replan caps · resumable state
+       Orchestrator (Python) holds the rules: gates run HERE · accept needs green gates
+       + a real diff + evidence · task_complete ⇒ final verify + regression sweep in a
+       PRISTINE checkout · budget / attempt / replan caps · resumable state
 ```
 
-The PM's opinion alone can never mark anything done: when gates are red, `accept` is
-not even in its response schema. And the gates alone never end the run: the PM judges
-green-gated work against the acceptance criteria and can reject, replan, or descope.
+- **Persistent planner.** One long-lived session that plans, writes every developer
+  prompt, reviews every result, and decides what happens next.
+- **Disposable developer sessions.** Each step is implemented by a fresh session whose only
+  authority is to change code.
+- **Deterministic verification.** A step's checks are plain commands run by the
+  orchestrator. Exit 0, or it didn't happen.
+- **The orchestrator holds the rules.** Budgets, retries, commits, and the "is it done?"
+  decision live in code, never in a prompt.
 
-## Layout
+## Design philosophy
 
-```
-orchestrator/
-  config.py     knobs: models (Opus 4.8 both), caps, budget, paths
-  claude_cli.py subprocess wrapper around `claude -p --output-format json`
-  pm.py         the PM session: directive schemas (dynamic!), payloads, evidence checks
-  plan.py       the living plan: PM-authored mutations, validation, trivial-gate denylist
-  developer.py  dev calls with schema-forced structured summaries
-  gates.py      deterministic verification (setup/check/teardown; empty list = FAIL)
-  handover.py   the handover packet: diff + gate transcript + integrity flags
-  probe.py      deterministic probes: http, port, docker-build, env-file, proc-up
-  ledger.py     durable resumable state, budget kill switch, git commits + worktrees
-  seed.py       context seeding: brief.md from /handoff, --brief, --seed-session, or task
-  loop.py       the control plane enforcing all of the above
-  env.py        tiny stdlib .env loader (so you never have to `export`)
-prompts/        pm_system.md · dev_system.md
-commands/       handoff.md — the /handoff slash command for your interactive sessions
-benchmarks/     loop-vs-raw-agent harness + task suite (see benchmarks/README.md)
-run.py          entrypoint
-Dockerfile      the sandbox (non-root — required for bypassPermissions)
-tests/          unit + scripted end-to-end tests (stdlib unittest, no network)
-```
+- **Models propose; the harness disposes.** No agent can mark its own work complete.
+- **Verification is deterministic and external.** Pass/fail is decided by commands with
+  exit codes, not by a model's opinion.
+- **"Done" means reproducibly verified.** A task is complete only after its final checks —
+  and every accepted step's checks — pass in a clean, from-scratch checkout.
+- **Every step is a reviewable commit.** The git log is the audit trail; each accepted step
+  is one commit on an isolated run branch.
+- **Bounded autonomy.** Budget, attempt, and replan caps mean failures re-plan or stop with
+  a report — they don't hang or burn money silently.
+- **Resumable.** State is durable; a crash or a budget stop continues with one flag.
 
-## Prerequisites
+## Key features
 
-- **Python 3.10+** (standard library only — no pip installs).
-- **git** on PATH.
-- **Claude Code CLI**: `npm install -g @anthropic-ai/claude-code` (verified on 2.1.205).
-- **Auth** — copy the env template and drop your token in (loaded automatically, no
-  `export` needed):
+- Plan → implement → **verify** → commit loop that runs unattended to completion.
+- A planner that stays in the loop: it reviews each result and re-plans on failure.
+- Deterministic gates the model can't bypass, plus built-in probes for real-world checks
+  (HTTP, TCP ports, `docker build`, env files, "does the server actually boot").
+- One git commit per accepted step on a throwaway run branch — your main branch is untouched.
+- Per-run USD budget with mid-run enforcement; stops are resumable.
+- Seed a run from an interactive Claude Code session (`/handoff`) or a spec file.
+- Standard library only — no Python dependencies to install.
 
-  ```bash
-  cp .env.example .env      # then edit .env: set ANTHROPIC_API_KEY=sk-ant-...
-  ```
+## Quick start
 
-  `.env` is git-ignored. Alternatively use a Pro/Max subscription: `claude setup-token`
-  and put the token in `.env` as `CLAUDE_CODE_OAUTH_TOKEN`.
-
-## Seeding: getting your context into the PM
-
-You usually already explored the task in an interactive Claude Code session. Hand that
-context over — don't retype it:
-
-1. **`/handoff` (recommended).** Copy `commands/handoff.md` into the target repo's
-   `.claude/commands/` (or `~/.claude/commands/`). In your interactive session type
-   `/handoff` — it writes `.agentic/brief.md` (objective, verified repo facts, decisions
-   with rationale, environment, gotchas, out-of-scope, definition of done). Review it,
-   then launch the loop; the brief is picked up automatically.
-2. **`--seed-session <session-id>`.** Forks your interactive session headlessly
-   (`--fork-session`, the original is untouched) and has the fork distill the brief
-   itself. Full conversation fidelity. Must run from the same directory the session was
-   opened in; find ids via `claude --resume` (picker) or
-   `ls -t ~/.claude/projects/<dir-slug>/*.jsonl`.
-3. **`--brief file.md`** or a plain task string — for specs you already have.
-
-## Run it
-
-With your token in `.env` (see Prerequisites), just run — no `export` needed:
+Requirements: **Python 3.10+**, **git**, and the **Claude Code CLI**
+(`npm install -g @anthropic-ai/claude-code`).
 
 ```bash
-python run.py --repo ../my-app --budget 25            # picks up .agentic/brief.md
-python run.py "Add a /health endpoint with a passing test" --repo ../my-service
-python run.py --resume-run --repo ../my-app           # continue an interrupted run
+git clone https://github.com/ruchirk22/loopd
+cd loopd
+cp .env.example .env        # then set ANTHROPIC_API_KEY (or CLAUDE_CODE_OAUTH_TOKEN)
+
+python3 run.py "Add a /health endpoint that returns {\"status\":\"ok\"} plus a passing test" \
+  --repo ../my-service
 ```
 
-Exit codes: `0` verified done · `1` aborted (see `.agentic/escalation.json`) ·
-`2` setup/plan failure · `3` budget exceeded (raise `--budget`, then `--resume-run`).
+`--repo` is the project loopd works in; point it at an empty directory to start fresh (it
+initializes git for you) or at an existing repo to build on. Your token is read from `.env`
+automatically — no `export` needed.
 
-Because the developer runs with `--permission-mode bypassPermissions`, prefer the
-container for anything real:
+## Basic usage
 
 ```bash
-docker build -t agentic-loop .
-docker run --rm --env-file .env \
-  -v "$(pwd)/../my-app:/work" agentic-loop --budget 25
+# a task described inline, or read from a file with @:
+python3 run.py @spec.md --repo ../my-service
+
+# resume an interrupted run (e.g. after a budget stop), with more budget:
+python3 run.py --resume-run --repo ../my-service --budget 20
 ```
 
-The container runs as a non-root user (Claude Code refuses `bypassPermissions` as
-root) with git identity preconfigured. The mounted repo must be writable by uid 1001.
-
-## How a step flows
-
-1. **Dispatch.** The PM authors the developer's instructions verbatim (fresh session,
-   or deliberately resuming the step's previous one).
-2. **Inner loop.** The developer implements; the orchestrator runs the step's frozen
-   `verify` commands. Red gates resume the same dev session with the transcript — up
-   to `MAX_ATTEMPTS_PER_STEP` — without spending a PM turn.
-3. **Handover.** The PM reviews the packet: the dev's structured summary, the real
-   diff, the orchestrator's gate transcript, and integrity flags (no-op diff, tests
-   touched, gate-target files touched — each must be addressed explicitly).
-4. **Directive.** `accept` (commit — refused for no-op diffs or unverifiable evidence),
-   `reject` (feedback to the same dev session, capped), `replan` (plan mutations,
-   validated: unique ids, no unverifiable or trivially-true steps, done steps
-   immutable), `descope` (skip with recorded impact), or `abort`.
-5. **Finalize.** When no steps remain, `task_complete` runs the PM's `final_verify`
-   (plus any `--final-verify` you demand) AND replays every accepted step's gates in a
-   **pristine worktree** — a clean checkout of HEAD — so "done" means reproducible.
-6. **Checkpoint.** Every ~8 reviews (or on handover-byte pressure) the PM writes a
-   structured checkpoint and a fresh PM session takes over, seeded from
-   brief + checkpoint + ledger digest. The same path powers `--resume-run` and
-   recovery from lost sessions — resume is not a special case.
-
-State (`state.json`, atomic writes), the event log (`log.jsonl`), handover packets,
-discarded-work diffs, and escalation reports all live under `<repo>/.agentic/`, which
-is excluded from the target repo's history. Each run works on its own git branch
-(`agentic/run-<ts>`, `USE_RUN_BRANCH=0` to disable) with a commit per accepted step.
-
-## Verification cookbook (deployment-shaped tasks)
-
-For "does it actually deploy/boot/serve" checks, the PM composes deterministic probes
-instead of fragile one-liners — see `orchestrator/probe.py`:
+**Continuing work you've already scoped.** If you explored the task in an interactive
+Claude Code session, hand that context over instead of retyping it. Install the `/handoff`
+command (`cp commands/handoff.md <repo>/.claude/commands/`), run `/handoff` in that session
+to write `.agentic/brief.md`, review it, then launch — loopd picks the brief up
+automatically:
 
 ```bash
-python3 -m orchestrator.probe http --url http://localhost:8080/health --expect-status 200 --expect-body ok
-python3 -m orchestrator.probe docker-build --path . --tag check
-python3 -m orchestrator.probe env-file --path .env.production --requires DATABASE_URL,GCS_BUCKET
-python3 -m orchestrator.probe proc-up --start "npm run preview -- --port 4173" \
-    --ready-port 4173 --then "python3 -m orchestrator.probe http --url http://localhost:4173 --expect-status 200"
+python3 run.py --repo ../my-app --budget 25
 ```
 
-Container-build or emulator gates inside the Docker sandbox need the docker CLI /
-gcloud SDK added to the image and (for docker) a socket mount — a real blast-radius
-tradeoff; keep it opt-in and never on a host holding real credentials.
+For real work, run inside the container so the developer's file access is confined to it
+(see [docs/security.md](docs/security.md)):
+
+```bash
+docker build -t loopd .
+docker run --rm --env-file .env -v "$(pwd)/../my-app:/work" loopd --budget 25
+```
+
+## How a run works
+
+1. **Plan.** The planner reads the repo and produces an ordered set of steps, each with
+   acceptance criteria and `verify` commands (real checks — tests, builds, linters, probes).
+2. **Dispatch.** The planner writes the developer's instructions for the next step.
+3. **Implement + verify.** The developer makes the change; the orchestrator runs the step's
+   `verify` commands. Red gates send the developer back with the transcript — up to a retry
+   cap — without spending a planner turn.
+4. **Review.** The planner sees a handover packet (the developer's summary, the real git
+   diff, the gate transcript) and decides: **accept** (commit and continue), **reject**
+   (send feedback), **replan**, **descope**, or **abort**. Accept is only offered when the
+   gates are green.
+5. **Finalize.** When no steps remain, the task's final checks *and* every accepted step's
+   checks are replayed in a **pristine checkout**. Only then is the run complete.
+
+Everything is recorded under `<repo>/.agentic/` (plan state, event log, handover packets,
+final report) and committed step-by-step on an isolated `agentic/run-<timestamp>` branch.
+
+Exit codes: `0` verified done · `1` stopped with a report · `2` setup/plan problem ·
+`3` budget exceeded (resumable). A stopped run always leaves `.agentic/escalation.json`.
 
 ## Configuration
 
-All via env vars (see `.env.example`): `PM_MODEL` / `DEV_MODEL` (default
-`claude-opus-4-8` — pinned, not the floating alias), `BUDGET_USD`,
-`MAX_ATTEMPTS_PER_STEP`, `MAX_REJECTIONS_PER_STEP`, `MAX_REPLANS`,
-`CHECKPOINT_EVERY_REVIEWS`, `HANDOVER_BYTES_CAP`, `MAX_WALL_CLOCK_MIN`, and more.
+Copy `.env.example` to `.env` and set your token; that's the only required configuration.
+Common knobs (all optional, via `.env` or environment):
 
-## Tests
+| Variable | Default | Meaning |
+|---|---|---|
+| `PM_MODEL`, `DEV_MODEL` | `claude-opus-4-8` | models for the planner and developer |
+| `BUDGET_USD` | `25` | per-run spend cap (also `--budget`) |
+| `MAX_ATTEMPTS_PER_STEP` | `3` | developer↔gate retries per step |
+| `MAX_REPLANS` | `3` | plan revisions before the run stops |
 
-```bash
-python3 -m unittest discover -s tests -v
-```
+The full list of variables, CLI flags, and seeding options is in
+[docs/configuration.md](docs/configuration.md).
 
-No network, no Claude CLI needed: the end-to-end test drives the whole loop with a
-scripted fake PM/dev.
+## Documentation
 
-## Safety notes
-
-- **Sandbox is mandatory for real work.** `bypassPermissions` skips approval prompts;
-  that is only acceptable inside the container / a throwaway worktree.
-- **Gate commands come from an LLM** and run with `shell=True`. Fine inside the
-  sandbox; never run an untrusted plan on your host. Each gate runs in its own process
-  group and is group-killed on timeout, and git runs with hooks disabled so a
-  dev-planted `.git/hooks` script can't execute under the orchestrator.
-- **Money:** Opus 4.8 on both agents is powerful and not cheap. The budget is checked
-  after *every* CLI call (planning and seeding included; a timed-out call is charged an
-  estimate rather than $0) and a budget stop is resumable — start conservative and raise
-  deliberately.
-
-### Trust boundary (what the rails do and don't guarantee)
-
-The verification spine is hardened but not a sandbox against a *malicious* PM — the PM
-and developer are the same model, so this is defense against sloppiness and drift, not a
-cryptographic guarantee:
-
-- **Gate authorship is trusted.** The orchestrator screens verify commands for
-  triviality (`true || pytest`, `ls`, `test -d .`, comment-only, etc. are rejected) and
-  flags edits to gate-defining files (`package.json`, `Makefile`, `pytest.ini`, …), but a
-  determined PM could still author a weak-but-non-trivial check. Spot-check the `verify`
-  lists on early runs; the final pristine-worktree verification + regression sweep is the
-  backstop.
-- **`.agentic/` lives inside the target repo** (for observability) and the developer has
-  write access there. During a run its state is held in memory and rewritten, but a brief
-  or state file tampered with between a stop and `--resume-run` is trusted on reload
-  (resume validates the schema/version, not authenticity). If that matters for your threat
-  model, run each step in a fresh container.
-- **Evidence proves the PM cited real ground truth, not that the code is correct.**
-  Accept requires verbatim quotes from the git diff / gate transcript (never the
-  developer's self-report), with every acceptance criterion covered. That forces the PM
-  to look at what actually happened and stops blind rubber-stamping — but it can't prove
-  each criterion is *semantically* met by its quote, and it won't catch a PM that
-  genuinely misjudges. Deterministic gates remain the arbiter of "done".
+- [docs/architecture.md](docs/architecture.md) — how the loop, directives, and verification
+  fit together.
+- [docs/configuration.md](docs/configuration.md) — every setting, flag, and seeding mode.
+- [docs/security.md](docs/security.md) — the sandbox model and what the guarantees do and
+  don't cover.
+- [benchmarks/README.md](benchmarks/README.md) — measuring loopd against a raw one-shot agent.
