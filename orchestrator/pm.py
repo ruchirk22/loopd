@@ -112,19 +112,27 @@ _BANNED_EVIDENCE = {"all gates passed", "gates failed", "gate verdict", "ground 
                     "test session starts", "collected", "rootdir", "platform"}
 _BANNED_RE = re.compile(r"^(=+|-+|\d+ passed.*|\d+ failed.*|collected \d+ items?.*)$")
 _MIN_QUOTE = 12
-_SCAFFOLD = ("###", "```", "diff --git", "index ", "@@", "[setup]", "[teardown]", "[ok]", "$ ")
+# Generic markers only. NOTE: `$ <cmd>` gate-command lines are NOT scaffolding — for
+# assertion-style checks that print nothing on success (python3 -c "assert ...", test -f x),
+# the command line is the ONLY per-criterion evidence, and since accept is offered only when
+# the whole gate is green, quoting a command that ran IS valid proof it passed.
+_SCAFFOLD = ("###", "```", "diff --git", "index ", "@@", "[setup]", "[teardown]", "[ok]")
 
 
 def _proof_lines(corpus: str):
     """Yield (strict, loose) content lines: `strict` drops all scaffolding; `loose` also
     keeps diff +/- body lines with their marker stripped, so a contiguous hunk copy still
-    matches its content."""
+    matches its content. Gate `$ command` lines are kept (see _SCAFFOLD note)."""
     strict, loose = [], []
     for line in corpus.splitlines():
         s = line.strip()
         if not s or s.startswith(_SCAFFOLD):
             continue
         if s.startswith(("+++ ", "--- ")):
+            continue
+        if s.startswith("$ "):  # gate command line: keep verbatim, don't diff-strip it
+            strict.append(s)
+            loose.append(s)
             continue
         if s[:1] in "+-" and not s.startswith(("+++", "---")):
             loose.append(s[1:].strip())  # diff body content without the +/- marker

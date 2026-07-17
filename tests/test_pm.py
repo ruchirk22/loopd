@@ -122,6 +122,21 @@ class TestEvidence(unittest.TestCase):
         probs = verify_evidence(d, step(), HANDOVER)
         self.assertTrue(any("too short" in p for p in probs))
 
+    def test_gate_command_lines_are_valid_evidence(self):
+        # Reproduces a real run: assertion-style gates print nothing on success, so the
+        # `$ <cmd>` line is the only per-criterion proof. It MUST be quotable.
+        corpus = ('$ python3 -c "import roman; assert roman.to_roman(4) == \'IV\'"\n[ok]\n'
+                  '$ python3 -m unittest discover -q\n[ok]')
+        s = Step(id="1", goal="g", verify=["python3 -c \"assert roman.to_roman(4)==\'IV\'\""],
+                 acceptance_criteria=["to_roman(4) returns IV", "unit tests pass"])
+        d = {"criteria_evidence": [
+            {"criterion": "to_roman(4) returns IV", "satisfied": True,
+             "evidence": '$ python3 -c "import roman; assert roman.to_roman(4) == \'IV\'"'},
+            {"criterion": "unit tests pass", "satisfied": True,
+             "evidence": "$ python3 -m unittest discover -q"},
+        ]}
+        self.assertEqual(verify_evidence(d, s, corpus), [])
+
     def test_same_quote_may_cover_distinct_criteria(self):
         # a one-line change can legitimately satisfy two criteria derived from that line
         q = "test_health.py passed 1 test in 0.2s"
