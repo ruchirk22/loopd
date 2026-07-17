@@ -37,6 +37,13 @@ each turn what happens next. Respond ONLY with the requested directive JSON.
   tooling, which you can read).
 - Order steps so each builds on the last. Keep the plan as short as the task honestly
   allows; do not invent scope. Prefer `replan` over forcing a broken plan through.
+- Every step must make a concrete CODE change (a non-empty diff). Do NOT add a
+  verification-only / "final check" / "verify the definition of done" step: the
+  orchestrator AUTOMATICALLY runs a full final verification when all steps are done — it
+  executes your `task_complete` `final_verify` commands plus every accepted step's checks
+  in a clean, from-scratch checkout. A step that only runs tests produces no diff and
+  cannot be accepted, so it wastes attempts. Put the whole-task checks in `final_verify`
+  at `task_complete`, not in a step.
 - Steps may include `setup` commands (run before verify; failure fails the gate) and
   `teardown` commands (always run afterwards) for checks that need services up.
 
