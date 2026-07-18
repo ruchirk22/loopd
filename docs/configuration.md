@@ -41,7 +41,8 @@ How the planner gets its context (in order of fidelity):
 | `--final-verify <cmd>` | Extra command required in final verification (repeatable). |
 
 Exit codes: `0` verified done · `1` stopped with a report · `2` setup/plan failure ·
-`3` budget exceeded (resumable). A non-zero stop writes `.agentic/escalation.json`.
+`3` budget exceeded (resumable). Every run writes a summary to `.agentic/report.md`; a
+non-zero stop also writes `.agentic/escalation.json`.
 
 ## Environment variables
 

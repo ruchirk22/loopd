@@ -172,6 +172,7 @@ The full list of variables, CLI flags, and seeding options is in
 
 ## Documentation
 
+- [docs/usage.md](docs/usage.md) — how to run loopd day to day.
 - [docs/architecture.md](docs/architecture.md) — how the loop, directives, and verification
   fit together.
 - [docs/configuration.md](docs/configuration.md) — every setting, flag, and seeding mode.

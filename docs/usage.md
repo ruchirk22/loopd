@@ -1,0 +1,194 @@
+# Usage
+
+How to actually run loopd day to day. For the reference list of every flag and variable see
+[configuration.md](configuration.md); for what happens under the hood see
+[architecture.md](architecture.md).
+
+## 1. Setup (once)
+
+You need **Python 3.10+**, **git**, and the **Claude Code CLI**:
+
+```bash
+npm install -g @anthropic-ai/claude-code
+git clone https://github.com/ruchirk22/loopd && cd loopd
+cp .env.example .env
+```
+
+Open `.env` and uncomment **exactly one** auth line:
+
+- `ANTHROPIC_API_KEY=sk-ant-...` — billed as API usage, or
+- `CLAUDE_CODE_OAUTH_TOKEN=...` — from `claude setup-token`, to use a Claude Pro/Max plan.
+
+> If both are set the API key wins, so leave the unused one commented — an unfilled
+> `sk-ant-...` placeholder will break auth. `.env` is git-ignored; loopd loads it
+> automatically, so you never `export` anything.
+
+Sanity check: `claude -p "say hi"` should reply, not error.
+
+## 2. Give loopd a task
+
+There are four ways to hand over what you want built, in rough order of increasing context.
+
+**A. Inline** — a one-liner:
+
+```bash
+python3 run.py "Add a /health endpoint returning {\"status\":\"ok\"} plus a passing test" \
+  --repo ../my-service
+```
+
+**B. A spec file** — for anything longer than a sentence, write it in a file and pass `@`:
+
+```bash
+python3 run.py @spec.md --repo ../my-service
+```
+
+**C. `/handoff` (recommended for real work).** If you already explored the task in an
+interactive Claude Code session, hand that context over instead of retyping it. Install the
+command once, run it in your session, review the brief it writes, then launch:
+
+```bash
+cp commands/handoff.md ../my-app/.claude/commands/   # once per repo (or into ~/.claude/commands/)
+# in an interactive Claude Code session opened on ../my-app, type:  /handoff
+# → it writes ../my-app/.agentic/brief.md ; review/edit it, then:
+python3 run.py --repo ../my-app --budget 25          # brief is picked up automatically
+```
+
+**D. `--seed-session <id>`.** Fork a live interactive session headlessly (the original is
+untouched) and let the fork distill the brief itself — highest fidelity. Must run from the
+same directory the session was opened in:
+
+```bash
+python3 run.py --seed-session <session-id> --repo ../my-app
+# find the id via `claude --resume` (picker) or: ls -t ~/.claude/projects/<slug>/*.jsonl | head -1
+```
+
+`--repo` is always required. Point it at an **empty directory** to start a project from
+scratch (loopd runs `git init` for you) or at an **existing repo** to build on.
+
+## 3. Run it safely
+
+The developer agent runs with permissions bypassed so it can work unattended. For anything
+you care about, run inside the container so its file access is confined to it:
+
+```bash
+docker build -t loopd .
+docker run --rm --env-file .env -v "$(pwd)/../my-app:/work" loopd --budget 25
+```
+
+Running `python3 run.py` directly is fine for a throwaway directory you don't mind the agent
+editing. See [security.md](security.md) for the full sandbox model.
+
+## 4. Write a good brief (the highest-leverage thing you do)
+
+loopd is only as good as what you ask for. Whether you write the brief by hand, via
+`/handoff`, or in a `@spec.md`, cover:
+
+- **Objective** — what must exist when this is done, in *testable* terms.
+- **Constraints / decisions already made** — stack, conventions, "do not change X", with
+  the rationale so the planner doesn't re-litigate them.
+- **Environment** — target infra, emulators/local substitutes, and required secret/config
+  **names** (never values).
+- **Out of scope** — what it must not touch.
+- **Definition of done** — a checklist of statements that must all hold, ideally ones a
+  shell command could verify.
+
+The `/handoff` command produces exactly this shape. The clearer the "definition of done",
+the better the planner's `verify` commands — and those gates are what decide success.
+
+## 5. While it runs
+
+loopd prints live progress (`→ Step …`, `dev attempt …`, `gates: PASS`, `✓ accepted …`).
+Everything is also written under `<repo>/.agentic/`:
+
+| File | What it is |
+|---|---|
+| `state.json` | live plan + status + costs (atomic; the basis for resume) |
+| `log.jsonl` | append-only event stream |
+| `handovers/` | exactly what the planner reviewed each step |
+| `report.md` | the end-of-run summary (written on success *and* failure) |
+| `escalation.json` | why it stopped (only on a non-zero exit) |
+
+You can **Ctrl-C** at any time — state is saved and the run is resumable.
+
+## 6. After a run
+
+Start with the report:
+
+```bash
+cat ../my-app/.agentic/report.md
+```
+
+It shows the outcome, per-step status/attempts/cost, the commits made, anything descoped,
+and — on failure — why it stopped. Then inspect the work itself:
+
+```bash
+cd ../my-app
+git log --oneline            # baseline + one commit per accepted step, on agentic/run-<ts>
+git diff master              # everything the run changed
+```
+
+Each run works on its own `agentic/run-<timestamp>` branch, so your main branch is never
+touched. To keep the work:
+
+```bash
+git checkout master && git merge agentic/run-<timestamp>
+```
+
+### Exit codes
+
+| Code | Meaning | What to do |
+|---|---|---|
+| `0` | verified done | merge the run branch |
+| `1` | stopped with a report | read `report.md` / `escalation.json`; fix the brief or repo, then `--resume-run` |
+| `2` | setup / plan problem | fix the input (e.g. dirty tree, unusable brief) and re-run |
+| `3` | budget exceeded | raise `--budget` and `--resume-run` — progress is kept |
+
+## 7. Resume, retry, redo
+
+```bash
+python3 run.py --resume-run --repo ../my-app --budget 40   # continue where it stopped
+python3 run.py --fresh      --repo ../my-app               # archive old state, start over
+```
+
+Budget stops and interrupts are always resumable — you never lose accepted steps.
+
+## 8. Control cost
+
+- Set a ceiling with `--budget` (or `BUDGET_USD` in `.env`); it's enforced after every model
+  call, and a stop is resumable, so start conservative and raise deliberately.
+- Choose models in `.env` (`PM_MODEL`, `DEV_MODEL`; default `claude-opus-4-8`). A cheaper
+  model like `haiku` is fine for simpler tasks.
+- The loop's overhead only pays off on multi-step work — for a trivial one-file change, a
+  plain `claude -p` is cheaper.
+
+## 9. Verify real-world projects
+
+The planner composes deterministic checks into each step's `verify` commands, including
+built-in probes for things unit tests can't cover:
+
+```bash
+python3 -m orchestrator.probe http --url http://localhost:8080/health --expect-status 200
+python3 -m orchestrator.probe docker-build --path .
+python3 -m orchestrator.probe env-file --path .env.production --requires DATABASE_URL,GCS_BUCKET
+python3 -m orchestrator.probe proc-up --start "npm run preview -- --port 4173" \
+    --ready-port 4173 --then "python3 -m orchestrator.probe http --url http://localhost:4173"
+```
+
+Full probe list and options: [configuration.md](configuration.md#verification-probes).
+
+## 10. Troubleshooting
+
+- **Everything fails instantly at $0 cost** → auth. Check `.env` has a working key/token and
+  that a placeholder `sk-ant-...` isn't overriding your OAuth token.
+- **"uncommitted changes … USE_RUN_BRANCH is off"** → commit/stash your work, or leave
+  `USE_RUN_BRANCH=1` so loopd isolates the run on its own branch.
+- **A step fails all attempts** → the planner will reject/replan/descope automatically; if
+  the whole run stops, `report.md` and `escalation.json` say why. Often the fix is a clearer
+  brief or a missing dependency in the target repo.
+- **Model not available** → pick a model your account/plan supports via `PM_MODEL`/`DEV_MODEL`.
+
+## See also
+
+- [configuration.md](configuration.md) — every flag, env var, and seeding mode.
+- [architecture.md](architecture.md) — how the loop and its guarantees work.
+- [security.md](security.md) — the sandbox and the trust boundary.
