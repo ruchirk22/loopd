@@ -121,7 +121,9 @@ class TestHappyPath(LoopTestBase):
                 ("Review the developer's handover", ACCEPT),
                 ("All planned steps are accepted",
                  {"verdict": "task_complete", "reasoning": "brief satisfied",
-                  "final_verify": ["test -f hello.txt", "test -f app.txt"]}),
+                  "final_verify": ["test -f hello.txt", "test -f app.txt"],
+                  "memory": {"decisions": ["hello.txt is the deliverable"],
+                             "todos": ["add a greeting param"]}}),
             ],
             dev_script=[("Create hello.txt", dev_writes_hello())],
         )
@@ -143,6 +145,10 @@ class TestHappyPath(LoopTestBase):
         self.assertIn("complete", report)
         self.assertIn("Changes committed", report)
         self.assertIn("produce hello.txt", report)
+        # engineering memory updated from the PM's task_complete directive
+        mem = (self.cfg.state_dir / "memory.md").read_text()
+        self.assertIn("hello.txt is the deliverable", mem)
+        self.assertIn("add a greeting param", mem)
 
 
 class TestRedGatesDescope(LoopTestBase):
@@ -231,6 +237,9 @@ class TestCorrectiveAndAbort(LoopTestBase):
         report = (self.cfg.state_dir / "report.md").read_text()
         self.assertIn("stopped", report)
         self.assertIn("Why it stopped", report)
+        # the failure is recorded to engineering memory for future runs
+        mem = (self.cfg.state_dir / "memory.md").read_text()
+        self.assertIn("Past failures", mem)
 
 
 class TestBudgetStopAndResume(LoopTestBase):

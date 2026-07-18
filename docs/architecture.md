@@ -18,6 +18,7 @@ rules neither agent can override.
 | `orchestrator/ledger.py` | Durable state, per-step git commits, run branch, budget enforcement, resume. |
 | `orchestrator/seed.py` | Turns `/handoff`, `--brief`, `--seed-session`, or a task string into `.agentic/brief.md`. |
 | `orchestrator/loop.py` | The control plane that ties it together and enforces every rule. |
+| `orchestrator/memory.py` | Engineering memory: `.agentic/memory.md` the planner reads each run and updates at the end. |
 | `orchestrator/dashboard.py` | Optional local web UI (stdlib `http.server`) to launch and watch runs; reads the same `.agentic/` files. |
 
 ## The step lifecycle
@@ -28,7 +29,8 @@ plan ─▶ [ dispatch ─▶ developer ⇄ gates (inner retries) ─▶ handove
                         accept · reject · replan · descope · abort ◀────────┘
 ```
 
-1. **Plan.** The planner (read-only tools) produces steps, each with `acceptance_criteria`
+1. **Plan.** The planner (read-only tools), seeded with the brief and the project's
+   engineering memory (`.agentic/memory.md`), produces steps, each with `acceptance_criteria`
    and `verify` commands. The plan is validated: unique ids, non-empty verify, and no
    trivially-true checks (`true`, bare `echo`, `ls`, `pytest || true`, …).
 2. **Dispatch.** The planner writes the developer's prompt verbatim for the next step.
@@ -71,9 +73,10 @@ Review is grounded in ground truth the agents can't fabricate:
 ## State, commits, and resume
 
 - All state lives under `<repo>/.agentic/`: `state.json` (atomic writes), `log.jsonl`
-  (event stream), `handovers/`, `escalation.json` (on failure), and `report.md` — a
-  human-readable end-of-run summary written on every outcome. It is excluded from the
-  target repo's history.
+  (event stream), `handovers/`, `escalation.json` (on failure), `report.md` (a
+  human-readable end-of-run summary written on every outcome), and `memory.md`
+  (engineering memory — persists across `--fresh`). It is excluded from the target repo's
+  history.
 - Each run works on an isolated `agentic/run-<timestamp>` branch, with one commit per
   accepted step — your main branch is never touched.
 - `--resume-run` reloads `state.json` and continues at the first unfinished step. Budget

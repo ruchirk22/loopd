@@ -190,6 +190,7 @@ def snapshot(repo, running: bool = False) -> dict:
         "timeline": _timeline(events),
         "has_report": (ad / "report.md").is_file(),
         "has_escalation": (ad / "escalation.json").is_file(),
+        "has_memory": (ad / "memory.md").is_file(),
     })
     return out
 
@@ -354,6 +355,9 @@ def _make_handler(manager: RunManager, default_repo: str, default_budget: float)
             elif u.path == "/api/report":
                 p = Path(repo).expanduser().resolve() / ".agentic" / "report.md"
                 self._json({"report": p.read_text(errors="replace") if p.is_file() else ""})
+            elif u.path == "/api/memory":
+                p = Path(repo).expanduser().resolve() / ".agentic" / "memory.md"
+                self._json({"memory": p.read_text(errors="replace") if p.is_file() else ""})
             elif u.path == "/api/step":
                 self._json(step_detail(repo, (q.get("id", [""]) or [""])[0]))
             else:
@@ -783,10 +787,12 @@ function renderApp(s){
         <div class="mstat"><div class="k">Gate pass</div><div class="v">${gaterate}</div></div>
       </div></div>
       <div class="card"><h3>Timeline</h3><div class="tl" id="tl"></div></div>
+      ${s.has_memory?`<div class="card"><h3>Project memory</h3><pre class="report" id="memory">loading…</pre></div>`:""}
     </div></div>`);
 
   renderTimeline(s.timeline||[]);
   if(s.has_report) loadReport();
+  if(s.has_memory) loadMemory();
 }
 
 function nodeLabel(n){ return {planner:"Plan",developer:"Developer",verification:"Verification",review:"Review",decision:"Decision"}[n]||"—"; }
@@ -822,6 +828,11 @@ async function loadReport(){
   const pre=$("#report"); if(!pre) return;
   try{ const r=await (await fetch("/api/report?repo="+encodeURIComponent(REPO))).json();
     if(pre.dataset.sig!==r.report){ pre.dataset.sig=r.report; pre.textContent=r.report||""; } }catch(e){}
+}
+async function loadMemory(){
+  const pre=$("#memory"); if(!pre) return;
+  try{ const r=await (await fetch("/api/memory?repo="+encodeURIComponent(REPO))).json();
+    if(pre.dataset.sig!==r.memory){ pre.dataset.sig=r.memory; pre.textContent=r.memory||"(empty)"; } }catch(e){}
 }
 
 async function openStep(id){

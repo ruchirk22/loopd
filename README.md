@@ -81,6 +81,8 @@ your interactive Claude Code session
 
 - Plan → implement → **verify** → commit loop that runs unattended to completion.
 - A planner that stays in the loop: it reviews each result and re-plans on failure.
+- **Engineering memory** — a structured `.agentic/memory.md` (architecture decisions, past
+  failures, TODOs) the planner reads every run and updates automatically.
 - Deterministic gates the model can't bypass, plus built-in probes for real-world checks
   (HTTP, TCP ports, `docker build`, env files, "does the server actually boot").
 - One git commit per accepted step on a throwaway run branch — your main branch is untouched.

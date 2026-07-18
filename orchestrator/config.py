@@ -64,6 +64,10 @@ class Config:
     # Isolate each run on its own git branch (agentic/run-<ts>) in the target repo.
     use_run_branch: bool = field(default_factory=lambda: _env("USE_RUN_BRANCH", "1") not in ("0", "false", ""))
 
+    # Engineering memory: the planner reads .agentic/memory.md each run and records durable
+    # knowledge (decisions, failures, TODOs) back to it. Survives --fresh.
+    update_memory: bool = field(default_factory=lambda: _env("UPDATE_MEMORY", "1") not in ("0", "false", ""))
+
     # --- Per-run inputs (set by run.py, not env) ---
     brief_path: Optional[Path] = None          # --brief: existing handover brief
     seed_session: Optional[str] = None         # --seed-session: fork an interactive session

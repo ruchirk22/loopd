@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from typing import List, Optional, Tuple
 
+from . import memory
 from .claude_cli import run_claude
 from .config import Config
 from .ledger import Ledger
@@ -94,6 +95,18 @@ def directive_schema(verdicts: List[str]) -> dict:
         props["plan_mutations"] = _MUTATION_SCHEMA
     if "task_complete" in verdicts:
         props["final_verify"] = {"type": "array", "items": {"type": "string"}}
+        props["memory"] = {
+            "type": "object",
+            "description": "Durable project knowledge to record for future runs.",
+            "properties": {
+                "decisions": {"type": "array", "items": {"type": "string"},
+                              "description": "Architecture/technical decisions made this run."},
+                "failures": {"type": "array", "items": {"type": "string"},
+                             "description": "Dead ends / failures hit, so future runs avoid them."},
+                "todos": {"type": "array", "items": {"type": "string"},
+                          "description": "Follow-ups discovered but out of scope."},
+            },
+        }
     return {"type": "object", "properties": props, "required": ["verdict", "reasoning"]}
 
 
@@ -270,8 +283,12 @@ class PMSession:
         parts = [
             "You are joining (or re-joining) an in-progress automated build run as its PM. "
             "Everything you need is below; the orchestrator enforces the rails.",
-            "\n## Task brief\n" + self.brief,
         ]
+        mem = memory.as_prompt(self.cfg.repo)
+        if mem:
+            parts.append("\n## Project memory (loopd) — honor these decisions, avoid the past "
+                         "failures, consider the TODOs\n" + mem)
+        parts.append("\n## Task brief\n" + self.brief)
         ckpt = self.ledger.state.get("checkpoint")
         if ckpt:
             parts.append(

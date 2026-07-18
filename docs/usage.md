@@ -122,7 +122,31 @@ loopd is only as good as what you ask for. Whether you write the brief by hand, 
 The `/handoff` command produces exactly this shape. The clearer the "definition of done",
 the better the planner's `verify` commands — and those gates are what decide success.
 
-## 6. While it runs
+## 6. Engineering memory
+
+loopd keeps a small, structured record of what it has learned about your project at
+`<repo>/.agentic/memory.md` — architecture decisions, past failures, and known TODOs:
+
+```
+## Architecture decisions
+- Auth uses JWT
+- No Redis (deployment restriction)
+- Prefer Playwright over Cypress
+
+## Past failures
+- Docker image exceeded size limit
+
+## Known TODOs
+- Replace polling with websockets
+```
+
+Every run **reads** it (the planner honors the decisions, avoids the past failures, and
+folds relevant TODOs into the plan) and **updates** it at the end — the planner records
+durable knowledge on success, and a stopped run is recorded as a failure. It survives
+`--fresh` (unlike a run's state) and is a plain file you can hand-edit or seed yourself.
+Disable auto-updates with `UPDATE_MEMORY=0`.
+
+## 7. While it runs
 
 loopd prints live progress (`→ Step …`, `dev attempt …`, `gates: PASS`, `✓ accepted …`).
 Everything is also written under `<repo>/.agentic/`:
@@ -137,7 +161,7 @@ Everything is also written under `<repo>/.agentic/`:
 
 You can **Ctrl-C** at any time — state is saved and the run is resumable.
 
-## 7. After a run
+## 8. After a run
 
 Start with the report:
 
@@ -170,7 +194,7 @@ git checkout master && git merge agentic/run-<timestamp>
 | `2` | setup / plan problem | fix the input (e.g. dirty tree, unusable brief) and re-run |
 | `3` | budget exceeded | raise `--budget` and `--resume-run` — progress is kept |
 
-## 8. Resume, retry, redo
+## 9. Resume, retry, redo
 
 ```bash
 python3 run.py --resume-run --repo ../my-app --budget 40   # continue where it stopped
@@ -179,7 +203,7 @@ python3 run.py --fresh      --repo ../my-app               # archive old state, 
 
 Budget stops and interrupts are always resumable — you never lose accepted steps.
 
-## 9. Control cost
+## 10. Control cost
 
 - Set a ceiling with `--budget` (or `BUDGET_USD` in `.env`); it's enforced after every model
   call, and a stop is resumable, so start conservative and raise deliberately.
@@ -188,7 +212,7 @@ Budget stops and interrupts are always resumable — you never lose accepted ste
 - The loop's overhead only pays off on multi-step work — for a trivial one-file change, a
   plain `claude -p` is cheaper.
 
-## 10. Verify real-world projects
+## 11. Verify real-world projects
 
 The planner composes deterministic checks into each step's `verify` commands, including
 built-in probes for things unit tests can't cover:
@@ -203,7 +227,7 @@ python3 -m orchestrator.probe proc-up --start "npm run preview -- --port 4173" \
 
 Full probe list and options: [configuration.md](configuration.md#verification-probes).
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 - **Everything fails instantly at $0 cost** → auth. Check `.env` has a working key/token and
   that a placeholder `sk-ant-...` isn't overriding your OAuth token.

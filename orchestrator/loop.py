@@ -16,7 +16,7 @@ from __future__ import annotations
 import time
 from typing import List, Optional, Tuple
 
-from . import developer, gates
+from . import developer, gates, memory
 from .config import Config
 from .handover import Handover, build_handover
 from .ledger import BudgetExceeded, GitError, Ledger, NoChangesError
@@ -73,6 +73,16 @@ def run(task: Optional[str], cfg: Config, resume: bool = False, fresh: bool = Fa
             print(f"\nRun report: {path}")
         except Exception:  # a report must never mask the real exit code
             pass
+        # Record a durable failure note in project memory (skip budget/wall-clock — those
+        # are operational, not project knowledge). Success-path memory is written by the PM.
+        if code not in (0, 3) and cfg.update_memory:
+            try:
+                task = (ledger.state.get("task") or "").strip().splitlines()
+                task = task[0][:80] if task else "task"
+                reason = (detail.strip().splitlines()[0][:140] if detail else "run stopped")
+                memory.merge(cfg.repo, {memory.FAILURES: [f"{task}: {reason}"]})
+            except Exception:
+                pass
     return code
 
 
@@ -317,6 +327,9 @@ def _finalize_phase(pm: PMSession, plan: Plan, ledger: Ledger,
     print("Final verification in a pristine worktree…")
     ok, transcript = _final_verification(final_cmds, plan, ledger, cfg)
     if ok:
+        if cfg.update_memory and d.get("memory"):
+            memory.merge(cfg.repo, memory.from_directive_memory(d["memory"]))
+            ledger.log({"event": "memory_updated"})
         ledger.finish()
         print("\n" + ledger.report(plan))
         print("\nTask complete — final verification and regression sweep passed. ✅")

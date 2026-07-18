@@ -97,6 +97,7 @@ All optional; defaults shown.
 | `PM_ALLOWED_TOOLS` | `Read,Glob,Grep` | planner is read-only |
 | `DEV_PERMISSION_MODE` | `bypassPermissions` | only safe inside the sandbox — see [security.md](security.md) |
 | `USE_RUN_BRANCH` | `1` | isolate each run on `agentic/run-<timestamp>` |
+| `UPDATE_MEMORY` | `1` | read + auto-update `.agentic/memory.md` (engineering memory) each run |
 
 ## Verification probes
 

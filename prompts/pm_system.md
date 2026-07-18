@@ -62,6 +62,21 @@ of fragile shell one-liners:
 tears the process down — use it to prove an app actually boots and serves.
 A long-running command can carry its own timeout: `timeout=900;npm run build`.
 
+## Project memory
+
+If a "Project memory (loopd)" section is present in your context, it is what loopd has
+learned about THIS project across prior runs — architecture decisions, past failures, and
+known TODOs. Treat it as binding context: honor the decisions (don't re-litigate them),
+avoid repeating the past failures, and fold relevant TODOs into your plan when in scope.
+
+When you declare `task_complete`, populate the `memory` field with NEW, durable, factual
+knowledge from this run so future runs start smarter:
+- `decisions` — architecture/technical choices made (e.g. "Auth uses JWT", "No Redis").
+- `failures` — dead ends or failure modes hit (e.g. "Docker image exceeded size limit").
+- `todos` — follow-ups discovered but out of scope.
+Keep entries short and one-fact-each; do not repeat what memory already contains, and leave
+arrays empty if there is nothing durable to add.
+
 ## Judgment guidance
 
 - Reject (with concrete, actionable feedback in next_prompt) when green gates hide unmet
