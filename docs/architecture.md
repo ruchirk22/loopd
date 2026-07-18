@@ -18,6 +18,7 @@ rules neither agent can override.
 | `orchestrator/ledger.py` | Durable state, per-step git commits, run branch, budget enforcement, resume. |
 | `orchestrator/seed.py` | Turns `/handoff`, `--brief`, `--seed-session`, or a task string into `.agentic/brief.md`. |
 | `orchestrator/loop.py` | The control plane that ties it together and enforces every rule. |
+| `orchestrator/dashboard.py` | Optional local web UI (stdlib `http.server`) to launch and watch runs; reads the same `.agentic/` files. |
 
 ## The step lifecycle
 

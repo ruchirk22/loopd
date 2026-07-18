@@ -132,6 +132,9 @@ docker build -t loopd .
 docker run --rm --env-file .env -v "$(pwd)/../my-app:/work" loopd --budget 25
 ```
 
+Prefer a browser? `python3 dashboard.py --repo ../my-app` opens a local dashboard to launch
+and watch runs live (see [docs/usage.md](docs/usage.md#4-the-web-dashboard-browser-ui)).
+
 ## How a run works
 
 1. **Plan.** The planner reads the repo and produces an ordered set of steps, each with

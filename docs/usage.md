@@ -78,7 +78,28 @@ docker run --rm --env-file .env -v "$(pwd)/../my-app:/work" loopd --budget 25
 Running `python3 run.py` directly is fine for a throwaway directory you don't mind the agent
 editing. See [security.md](security.md) for the full sandbox model.
 
-## 4. Write a good brief (the highest-leverage thing you do)
+## 4. The web dashboard (browser UI)
+
+Prefer a browser to the terminal? loopd ships a local dashboard that both **launches** runs
+(a task box that takes long tasks — your `@file` as a textarea) and **watches** them live.
+
+```bash
+python3 dashboard.py --repo ../my-app        # opens on http://127.0.0.1:8787
+```
+
+From the page you can:
+
+- **Start a run** — set the repo, paste the task/brief, budget, and (optionally) models,
+  then *Start new run* or *Resume interrupted run*.
+- **Watch live** — status, cost-vs-budget, steps done, replans, the current step, the plan
+  table, an event timeline, the raw console, and the final `report.md` when it lands.
+
+It reads the same `.agentic/` files the CLI writes and refreshes every couple of seconds.
+It is a **local tool** — it binds to `127.0.0.1` and spawns `run.py`, so don't expose it to
+a network. Flags: `--repo`, `--budget`, `--host`, `--port` (see
+[configuration.md](configuration.md#dashboard)).
+
+## 5. Write a good brief (the highest-leverage thing you do)
 
 loopd is only as good as what you ask for. Whether you write the brief by hand, via
 `/handoff`, or in a `@spec.md`, cover:
@@ -95,7 +116,7 @@ loopd is only as good as what you ask for. Whether you write the brief by hand, 
 The `/handoff` command produces exactly this shape. The clearer the "definition of done",
 the better the planner's `verify` commands — and those gates are what decide success.
 
-## 5. While it runs
+## 6. While it runs
 
 loopd prints live progress (`→ Step …`, `dev attempt …`, `gates: PASS`, `✓ accepted …`).
 Everything is also written under `<repo>/.agentic/`:
@@ -110,7 +131,7 @@ Everything is also written under `<repo>/.agentic/`:
 
 You can **Ctrl-C** at any time — state is saved and the run is resumable.
 
-## 6. After a run
+## 7. After a run
 
 Start with the report:
 
@@ -143,7 +164,7 @@ git checkout master && git merge agentic/run-<timestamp>
 | `2` | setup / plan problem | fix the input (e.g. dirty tree, unusable brief) and re-run |
 | `3` | budget exceeded | raise `--budget` and `--resume-run` — progress is kept |
 
-## 7. Resume, retry, redo
+## 8. Resume, retry, redo
 
 ```bash
 python3 run.py --resume-run --repo ../my-app --budget 40   # continue where it stopped
@@ -152,7 +173,7 @@ python3 run.py --fresh      --repo ../my-app               # archive old state, 
 
 Budget stops and interrupts are always resumable — you never lose accepted steps.
 
-## 8. Control cost
+## 9. Control cost
 
 - Set a ceiling with `--budget` (or `BUDGET_USD` in `.env`); it's enforced after every model
   call, and a stop is resumable, so start conservative and raise deliberately.
@@ -161,7 +182,7 @@ Budget stops and interrupts are always resumable — you never lose accepted ste
 - The loop's overhead only pays off on multi-step work — for a trivial one-file change, a
   plain `claude -p` is cheaper.
 
-## 9. Verify real-world projects
+## 10. Verify real-world projects
 
 The planner composes deterministic checks into each step's `verify` commands, including
 built-in probes for things unit tests can't cover:
@@ -176,7 +197,7 @@ python3 -m orchestrator.probe proc-up --start "npm run preview -- --port 4173" \
 
 Full probe list and options: [configuration.md](configuration.md#verification-probes).
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 - **Everything fails instantly at $0 cost** → auth. Check `.env` has a working key/token and
   that a placeholder `sk-ant-...` isn't overriding your OAuth token.

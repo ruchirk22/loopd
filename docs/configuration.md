@@ -44,6 +44,21 @@ Exit codes: `0` verified done · `1` stopped with a report · `2` setup/plan fai
 `3` budget exceeded (resumable). Every run writes a summary to `.agentic/report.md`; a
 non-zero stop also writes `.agentic/escalation.json`.
 
+## Dashboard
+
+`python3 dashboard.py` starts the local web UI to launch and watch runs
+([usage](usage.md#4-the-web-dashboard-browser-ui)).
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--repo <path>` | (none) | default target repo pre-filled in the launch form |
+| `--budget <usd>` | `BUDGET_USD` or 25 | default budget shown in the form |
+| `--host` | `127.0.0.1` | bind host — keep it local |
+| `--port` | `8787` | port |
+
+It spawns `run.py` and reads the paths you give it, so it is a **local tool only** — do not
+bind it to a public interface.
+
 ## Environment variables
 
 All optional; defaults shown.

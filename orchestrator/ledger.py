@@ -98,7 +98,9 @@ class Ledger:
         if led.state_path.exists():
             if resume:
                 led.state = led._load_valid_state()
+                led.state["budget_usd"] = cfg.budget_usd  # reflect this invocation's --budget
                 led._ensure_git(resume=True)
+                led._save()
                 led.log({"event": "run_resumed", "total_cost_usd": led.state.get("total_cost_usd", 0)})
                 return led
             if not fresh:
@@ -122,6 +124,7 @@ class Ledger:
             "task": "",
             "started": time.time(),
             "total_cost_usd": 0.0,
+            "budget_usd": cfg.budget_usd,
             "pm_session_id": None,
             "branch": led._current_ref(),
             "plan": None,
