@@ -106,24 +106,29 @@ Requirements: **Python 3.10+**, **git**, and the **Claude Code CLI**
 git clone https://github.com/ruchirk22/loopd
 cd loopd
 cp .env.example .env        # then set ANTHROPIC_API_KEY (or CLAUDE_CODE_OAUTH_TOKEN)
+ln -s "$(pwd)/loopd" /usr/local/bin/loopd     # put the `loopd` command on your PATH
 
-python3 run.py "Add a /health endpoint that returns {\"status\":\"ok\"} plus a passing test" \
-  --repo ../my-service
+cd ../my-service            # the current directory is your project
+loopd "Add a /health endpoint that returns {\"status\":\"ok\"} plus a passing test"
 ```
 
-`--repo` is the project loopd works in; point it at an empty directory to start fresh (it
-initializes git for you) or at an existing repo to build on. Your token is read from `.env`
-automatically — no `export` needed.
+The current directory is the project — you never paste a path. loopd forecasts the work,
+takes one decision (the budget), builds it, verifies it in a clean checkout, and hands you a
+committed change. Your token is read from `.env` automatically — no `export` needed.
 
 ## Basic usage
 
 ```bash
-# a task described inline, or read from a file with @:
-python3 run.py @spec.md --repo ../my-service
-
-# resume an interrupted run (e.g. after a budget stop), with more budget:
-python3 run.py --resume-run --repo ../my-service --budget 20
+loopd                       # the workspace home: status, history, "what do you want to build?"
+loopd "add rate limiting"   # build something
+loopd spec.md               # build from a markdown spec
+loopd resume                # continue a paused run (e.g. after a budget stop)
+loopd status                # how the last run went
+loopd ui                    # open the live dashboard in a browser
 ```
+
+Every command lives in the [CLI reference](docs/cli.md). Ctrl-C is always safe — nothing is
+lost, and `loopd resume` picks up exactly where it stopped.
 
 **Continuing work you've already scoped.** If you explored the task in an interactive
 Claude Code session, hand that context over instead of retyping it. Install the `/handoff`
@@ -143,8 +148,8 @@ docker build -t loopd .
 docker run --rm --env-file .env -v "$(pwd)/../my-app:/work" loopd --budget 25
 ```
 
-Prefer a browser? `python3 dashboard.py --repo ../my-app` opens a local dashboard to launch
-and watch runs live (see [docs/usage.md](docs/usage.md#5-the-web-dashboard-browser-ui)).
+Prefer a browser? `loopd ui` opens a local dashboard to launch and watch runs live (see
+[docs/usage.md](docs/usage.md#5-the-web-dashboard-browser-ui)).
 
 ## How a run works
 

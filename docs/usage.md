@@ -4,6 +4,10 @@ How to actually run loopd day to day. For the reference list of every flag and v
 [configuration.md](configuration.md); for what happens under the hood see
 [architecture.md](architecture.md).
 
+> **The `loopd` command is the day-to-day way in** — `loopd "<what to build>"` in your project,
+> and that's it. Every command is listed in the [CLI reference](cli.md). This guide shows the
+> underlying `run.py` engine and the concepts behind each step; both drive the same loop.
+
 ## 1. Setup (once)
 
 You need **Python 3.10+**, **git**, and the **Claude Code CLI**:

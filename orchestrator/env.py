@@ -32,7 +32,7 @@ def load_dotenv(path: Optional[Path] = None) -> bool:
             end = val.find(q, 1)
             val = val[1:end] if end != -1 else val[1:]
         else:
-            val = re.split(r"\s#", val, 1)[0].rstrip()  # strip an unquoted trailing ' #' comment
+            val = re.split(r"\s#", val, maxsplit=1)[0].rstrip()  # strip an unquoted trailing ' #' comment
         if key and key not in os.environ:
             os.environ[key] = val
     return True

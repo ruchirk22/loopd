@@ -33,10 +33,13 @@ class RunAborted(RuntimeError):
         super().__init__(reason)
 
 
-def run(task: Optional[str], cfg: Config, resume: bool = False, fresh: bool = False) -> int:
+def run(task: Optional[str], cfg: Config, resume: bool = False, fresh: bool = False,
+        on_start=None) -> int:
     # StateConflict (bad/missing/finished state, dirty tree w/o run branch) is a pre-loop
     # setup failure (exit 2, handled by run.py). A GitError while (re)establishing the repo
     # is resumable but has no ledger yet to escalate through — report and exit 1.
+    # `on_start` (optional callable) fires once the run begins building, after the forecast
+    # decision — the CLI uses it for its "I've got it from here" delegation reassurance.
     try:
         ledger = Ledger.load_or_start(cfg, resume=resume, fresh=fresh)
     except GitError as exc:
@@ -46,7 +49,7 @@ def run(task: Optional[str], cfg: Config, resume: bool = False, fresh: bool = Fa
     session_t0 = time.time()  # active time of THIS invocation (excludes idle between resumes)
     code, detail = 1, ""
     try:
-        code = _run(task, cfg, ledger, resume)
+        code = _run(task, cfg, ledger, resume, on_start=on_start)
     except BudgetExceeded as exc:
         code, detail = 3, str(exc)
         ledger.write_escalation("budget_exceeded", ledger.load_plan(), detail=detail)
@@ -110,7 +113,8 @@ def run(task: Optional[str], cfg: Config, resume: bool = False, fresh: bool = Fa
     return code
 
 
-def _run(task: Optional[str], cfg: Config, ledger: Ledger, resume: bool) -> int:
+def _run(task: Optional[str], cfg: Config, ledger: Ledger, resume: bool,
+         on_start=None) -> int:
     t0 = time.time()
     if not resume:
         ledger.start(task or "(from brief)")
@@ -120,6 +124,11 @@ def _run(task: Optional[str], cfg: Config, ledger: Ledger, resume: bool) -> int:
         _forecast_phase(cfg, ledger, brief)   # may raise RunAborted if the user declines
     elif resume:
         _restore_constrained(cfg, ledger)     # re-forecasting is skipped; honor the prior choice
+
+    # The forecast decision is made; real work is about to begin. This is where the CLI says
+    # "I've got it from here" — it must land after budget negotiation, not before.
+    if on_start:
+        on_start()
 
     pm = PMSession(cfg, ledger, brief)
 
