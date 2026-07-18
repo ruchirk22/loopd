@@ -71,8 +71,14 @@ def _render(data: dict) -> str:
     ])
 
 
-def ensure_brief(cfg: Config, ledger: Ledger, task: Optional[str]) -> str:
-    """Produce (or load) <repo>/.agentic/brief.md and return its text."""
+def ensure_brief(cfg: Config, ledger: Ledger, task: Optional[str],
+                 resume: bool = False) -> str:
+    """Produce (or load) <repo>/.agentic/brief.md and return its text.
+
+    Precedence: --brief and --seed-session always win. Otherwise, on a RESUME the
+    brief.md written at run start is authoritative; on a FRESH run explicit task text
+    wins over any leftover brief.md (which may belong to a previous, unrelated task —
+    brief.md survives --fresh, so a stale one must never silently override a new task)."""
     brief_file = cfg.state_dir / "brief.md"
 
     if cfg.brief_path:
@@ -107,13 +113,20 @@ def ensure_brief(cfg: Config, ledger: Ledger, task: Optional[str]) -> str:
         ledger.log({"event": "brief_forked", "session": cfg.seed_session, "cost": res.cost_usd})
         return brief_file.read_text()
 
-    if brief_file.exists():
+    # On resume, the brief written at run start is authoritative — never regenerate it.
+    if resume and brief_file.exists():
         ledger.log({"event": "brief_loaded", "source": str(brief_file)})
         return brief_file.read_text()
 
+    # Fresh run: explicit task text wins over any leftover brief.md from a prior task.
     if task and task.strip():
         brief_file.write_text(f"# Task brief\n\n## Objective\n{task.strip()}\n")
         ledger.log({"event": "brief_from_task_text"})
+        return brief_file.read_text()
+
+    # No task text (e.g. /handoff wrote the brief itself): use whatever is on disk.
+    if brief_file.exists():
+        ledger.log({"event": "brief_loaded", "source": str(brief_file)})
         return brief_file.read_text()
 
     raise RuntimeError(

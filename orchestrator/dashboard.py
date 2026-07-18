@@ -191,6 +191,7 @@ def snapshot(repo, running: bool = False) -> dict:
         "has_report": (ad / "report.md").is_file(),
         "has_escalation": (ad / "escalation.json").is_file(),
         "has_memory": (ad / "memory.md").is_file(),
+        "forecast": st.get("forecast"),  # predicted (+ 'actual' once the run ends)
     })
     return out
 
@@ -232,11 +233,41 @@ def step_detail(repo, step_id) -> dict:
     return out
 
 
-def build_run_command(repo, budget, mode: str) -> list:
+def build_run_command(repo, budget, mode: str, constrained: bool = False) -> list:
     """The `run.py` invocation for a launch. Pure, so it's testable without spawning."""
     cmd = [sys.executable, str(RUN_PY), "--repo", str(repo), "--budget", str(budget)]
     cmd.append("--resume-run" if mode == "resume" else "--fresh")
+    if constrained:
+        cmd.append("--constrained")
     return cmd
+
+
+def compute_forecast(repo, task, budget) -> dict:
+    """Pre-run Execution Forecast preview for the dashboard (one cheap model call, in-process).
+    Reads the task text or an existing .agentic/brief.md; does NOT touch run state. Returns
+    {'ok':True,'forecast':{...}} or {'ok':False,'error':...}."""
+    from orchestrator import forecast
+    from orchestrator.config import Config
+    try:
+        repo = Path(repo).expanduser().resolve()
+        brief = (task or "").strip()
+        if not brief:
+            bf = repo / ".agentic" / "brief.md"
+            brief = bf.read_text(errors="replace") if bf.is_file() else ""
+        if not brief:
+            return {"ok": False, "error": "enter a task (or write a brief via /handoff first)"}
+        cfg = Config(repo=repo)
+        cfg.forecast_enabled = True
+        try:
+            cfg.budget_usd = float(budget)
+        except (TypeError, ValueError):
+            pass
+        fc = forecast.run_forecast(cfg, brief, cfg.budget_usd, ledger=None)
+    except Exception as e:  # a preview must never 500 the dashboard
+        return {"ok": False, "error": f"forecast failed: {e}"}
+    if fc is None:
+        return {"ok": False, "error": "forecast unavailable (estimate call failed)"}
+    return {"ok": True, "forecast": fc.to_dict()}
 
 
 # ---------------------------------------------------------------- process control
@@ -251,7 +282,7 @@ class RunManager:
             p = self._procs.get(str(Path(repo).expanduser().resolve()))
             return p is not None and p.poll() is None
 
-    def launch(self, repo, task, budget, pm_model, dev_model, mode) -> dict:
+    def launch(self, repo, task, budget, pm_model, dev_model, mode, constrained=False) -> dict:
         repo = Path(repo).expanduser().resolve()
         if self.is_running(repo):
             return {"ok": False, "error": "a run is already active for this repo"}
@@ -267,7 +298,7 @@ class RunManager:
             budget = float(budget)
         except (TypeError, ValueError):
             return {"ok": False, "error": "budget must be a number"}
-        cmd = build_run_command(repo, budget, mode)
+        cmd = build_run_command(repo, budget, mode, constrained=constrained)
         env = dict(os.environ)
         if pm_model:
             env["PM_MODEL"] = pm_model
@@ -381,8 +412,12 @@ def _make_handler(manager: RunManager, default_repo: str, default_budget: float)
                     budget=body.get("budget", default_budget),
                     pm_model=(body.get("pm_model") or "").strip(),
                     dev_model=(body.get("dev_model") or "").strip(),
-                    mode=body.get("mode", "new"))
+                    mode=body.get("mode", "new"),
+                    constrained=bool(body.get("constrained")))
                 self._json(result, 200 if result.get("ok") else 409)
+            elif u.path == "/api/forecast":
+                self._json(compute_forecast(repo, body.get("task", ""),
+                                            body.get("budget", default_budget)))
             elif u.path == "/api/stop":
                 result = manager.stop(repo)
                 self._json(result, 200 if result.get("ok") else 409)
@@ -599,6 +634,24 @@ textarea{min-height:150px;resize:vertical;font-family:var(--mono);font-size:12.5
 .frow{display:flex;gap:10px;} .frow>*{flex:1;}
 .msg{font-size:13px;margin-top:12px;min-height:18px;} .msg.err{color:var(--bad);} .msg.ok{color:var(--ok);}
 .hint{color:var(--mut2);font-weight:400;}
+/* Execution forecast */
+.fc-card{margin-top:16px;border:1px solid var(--line2);border-radius:var(--r2);background:var(--card2);
+  padding:16px;box-shadow:var(--glow);}
+.fc-h{font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;
+  background:var(--grad);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:12px;}
+.fc-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;}
+.fc-stat{border:1px solid var(--line);border-radius:10px;padding:10px 11px;background:var(--card);}
+.fc-stat .k{font-size:10px;color:var(--mut2);letter-spacing:.04em;text-transform:uppercase;}
+.fc-stat .v{font-size:17px;font-weight:600;margin-top:3px;letter-spacing:-.02em;}
+.fc-gap{margin-top:12px;font-size:12.5px;padding:10px 12px;border-radius:10px;border:1px solid var(--line);}
+.fc-gap.bad{color:#fecaca;border-color:rgba(248,113,113,.35);background:rgba(248,113,113,.07);}
+.fc-gap.ok{color:#bbf7d0;border-color:rgba(34,197,94,.30);background:rgba(34,197,94,.07);}
+.fc-note{color:var(--mut2);font-size:11.5px;margin-top:6px;}
+.fc-analyzing{font-family:var(--mono);color:var(--acc);font-size:13px;letter-spacing:.08em;}
+.fc-acc{margin-top:12px;font-size:13px;color:var(--mut);} .fc-acc b{color:var(--fg);font-size:16px;}
+.btn.sm{padding:5px 11px;font-size:12px;margin-top:8px;}
+.chk{display:flex;align-items:center;gap:8px;margin-top:14px;font-size:12.5px;color:var(--mut);font-weight:400;}
+.chk input{width:auto;}
 </style></head>
 <body>
 <div class="top">
@@ -633,8 +686,11 @@ textarea{min-height:150px;resize:vertical;font-family:var(--mono);font-size:12.5
     <div><label>PM model</label><input id="f-pm" placeholder="default"></div>
     <div><label>Dev model</label><input id="f-dev" placeholder="default"></div>
   </div>
+  <label class="chk"><input type="checkbox" id="f-constrained"> Constrained mode — prioritize critical work, defer polish</label>
+  <div id="f-forecast"></div>
   <div class="frow" style="margin-top:18px;">
     <button class="btn primary" id="f-start">Start run</button>
+    <button class="btn ghost" id="f-estimate">Estimate first</button>
     <button class="btn ghost" id="f-cancel">Cancel</button>
   </div>
   <div class="msg" id="f-msg"></div>
@@ -662,6 +718,7 @@ async function init(){
   $("#newrun").onclick=()=>openModal();
   $("#f-cancel").onclick=closeModal; $("#scrim").onclick=closeModal;
   $("#f-start").onclick=()=>launch("new");
+  $("#f-estimate").onclick=estimate;
   $("#resume").onclick=()=>launch("resume");
   $("#stop").onclick=stopRun;
   $("#d-close").onclick=()=>$("#drawer").classList.remove("show");
@@ -679,12 +736,79 @@ async function launch(mode){
   try{
     const r=await fetch("/api/run",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({repo,task:$("#f-task").value,budget:$("#f-budget").value,
-        pm_model:$("#f-pm").value,dev_model:$("#f-dev").value,mode})});
+        pm_model:$("#f-pm").value,dev_model:$("#f-dev").value,mode,
+        constrained:$("#f-constrained").checked})});
     const d=await r.json();
     if(d.ok){ REPO=repo; msg.textContent="Started ("+d.mode+")"; msg.className="msg ok"; setTimeout(closeModal,700); }
     else{ msg.textContent="✗ "+(d.error||"failed"); msg.className="msg err"; }
   }catch(e){ msg.textContent="✗ "+e; msg.className="msg err"; }
   tick();
+}
+
+async function estimate(){
+  const msg=$("#f-msg"), fc=$("#f-forecast"); const repo=$("#f-repo").value.trim();
+  if(!repo){ msg.textContent="Enter a repo path."; msg.className="msg err"; return; }
+  msg.textContent="Analyzing task…"; msg.className="msg";
+  fc.innerHTML='<div class="fc-card"><div class="fc-analyzing">████████████ analyzing…</div></div>';
+  try{
+    const r=await fetch("/api/forecast",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({repo,task:$("#f-task").value,budget:$("#f-budget").value})});
+    const d=await r.json();
+    if(d.ok){ fc.innerHTML=forecastCardHTML(d.forecast); msg.textContent=""; }
+    else{ fc.innerHTML=""; msg.textContent="✗ "+(d.error||"forecast failed"); msg.className="msg err"; }
+  }catch(e){ fc.innerHTML=""; msg.textContent="✗ "+e; msg.className="msg err"; }
+}
+function useRecommended(b){ $("#f-budget").value=b; $("#f-constrained").checked=false; }
+function fmtMin(m){ m=Number(m)||0; if(m<1)return Math.round(m*60)+" sec"; if(m<90)return Math.round(m)+" min"; const h=(m/60)|0; return h+"h "+Math.round(m%60)+"m"; }
+function riskCls(r){ r=(r||"").toLowerCase(); return r==="high"?"bad":r==="low"?"ok":"warn"; }
+function forecastCardHTML(f){
+  const gap=Number(f.budget_gap_usd)||0, short=gap>0;
+  return `<div class="fc-card"><div class="fc-h">Execution Forecast</div>
+    <div class="fc-grid">
+      <div class="fc-stat"><div class="k">Est. cost</div><div class="v">${money(f.estimated_cost_usd)}</div></div>
+      <div class="fc-stat"><div class="k">Runtime</div><div class="v">${fmtMin(f.estimated_runtime_min)}</div></div>
+      <div class="fc-stat"><div class="k">Steps</div><div class="v">${f.estimated_steps}</div></div>
+      <div class="fc-stat"><div class="k">Confidence</div><div class="v">${f.confidence}%</div></div>
+      <div class="fc-stat"><div class="k">Risk</div><div class="v"><span class="badge ${riskCls(f.risk)}">${esc(f.risk)}</span></div></div>
+      <div class="fc-stat"><div class="k">Budget</div><div class="v">${money(f.budget_usd)}</div></div>
+    </div>`+
+    (short
+      ? `<div class="fc-gap bad">Short by ${money(gap)} — recommended ${money(f.recommended_budget_usd)} for retry headroom.
+          <button class="btn ghost sm" onclick="useRecommended(${f.recommended_budget_usd})">Use ${money(f.recommended_budget_usd)}</button>
+          <div class="fc-note">Or Start anyway to run in constrained mode (core work first; may stop before every criterion).</div></div>`
+      : `<div class="fc-gap ok">Budget covers the estimate (${money(-gap)} headroom).</div>`)+
+    (f.calibration_samples?`<div class="fc-note">Calibrated on ${f.calibration_samples} prior run(s) in this repo.</div>`:"")+
+  `</div>`;
+}
+function accuracyPct(p,a){
+  let parts=[]; for(const [pk,ak] of [["estimated_cost_usd","cost_usd"],["estimated_runtime_min","runtime_min"]]){
+    const P=p[pk],A=a[ak]; if(P==null||A==null)continue; const hi=Math.max(Math.abs(P),Math.abs(A));
+    parts.push(hi<=0?100:Math.max(0,Math.min(100,100*(1-Math.abs(A-P)/hi)))); }
+  return parts.length?Math.round(parts.reduce((x,y)=>x+y,0)/parts.length*10)/10:0;
+}
+function forecastPanel(s){
+  const f=s.forecast; if(!f) return "";
+  const a=f.actual;
+  if(a){
+    const acc=accuracyPct(f,a);
+    return `<div class="card"><h3>Forecast vs actual</h3><div class="mgrid">
+      <div class="mstat"><div class="k">Cost · predicted</div><div class="v">${money(f.estimated_cost_usd)}</div></div>
+      <div class="mstat"><div class="k">Cost · actual</div><div class="v">${money(a.cost_usd)}</div></div>
+      <div class="mstat"><div class="k">Runtime · predicted</div><div class="v">${fmtMin(f.estimated_runtime_min)}</div></div>
+      <div class="mstat"><div class="k">Runtime · actual</div><div class="v">${fmtMin(a.runtime_min)}</div></div>
+      <div class="mstat"><div class="k">Steps · predicted</div><div class="v">${f.estimated_steps}</div></div>
+      <div class="mstat"><div class="k">Steps · actual</div><div class="v">${a.steps_done}/${a.steps_total}</div></div>
+    </div><div class="fc-acc">Prediction accuracy <b>${acc}%</b>
+      <div class="progress" style="margin:8px 0 0;"><span style="width:${acc}%"></span></div></div></div>`;
+  }
+  return `<div class="card"><h3>Execution forecast</h3><div class="mgrid">
+    <div class="mstat"><div class="k">Est. cost</div><div class="v">${money(f.estimated_cost_usd)}</div></div>
+    <div class="mstat"><div class="k">Runtime</div><div class="v">${fmtMin(f.estimated_runtime_min)}</div></div>
+    <div class="mstat"><div class="k">Steps</div><div class="v">${f.estimated_steps}</div></div>
+    <div class="mstat"><div class="k">Confidence</div><div class="v">${f.confidence}%</div></div>
+    <div class="mstat"><div class="k">Risk</div><div class="v">${esc(f.risk)}</div></div>
+    <div class="mstat"><div class="k">Budget</div><div class="v">${money(f.chosen_budget_usd||f.budget_usd)}</div></div>
+  </div>${f.constrained?'<div class="fc-note">⚠ constrained mode — core work prioritized</div>':''}</div>`;
 }
 async function stopRun(){
   if(!REPO) return;
@@ -786,6 +910,7 @@ function renderApp(s){
         <div class="mstat"><div class="k">Replans</div><div class="v">${m.replans||0}</div></div>
         <div class="mstat"><div class="k">Gate pass</div><div class="v">${gaterate}</div></div>
       </div></div>
+      ${forecastPanel(s)}
       <div class="card"><h3>Timeline</h3><div class="tl" id="tl"></div></div>
       ${s.has_memory?`<div class="card"><h3>Project memory</h3><pre class="report" id="memory">loading…</pre></div>`:""}
     </div></div>`);

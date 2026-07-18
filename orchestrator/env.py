@@ -3,6 +3,7 @@ instead of `export`ing every shell. No dependencies (python-dotenv not required)
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -24,8 +25,14 @@ def load_dotenv(path: Optional[Path] = None) -> bool:
             continue
         key, _, val = line.partition("=")
         key, val = key.strip(), val.strip()
-        if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
-            val = val[1:-1]  # strip one layer of surrounding quotes
+        if val[:1] in ("'", '"'):
+            # Quoted value: content runs to the matching close quote; keep any '#' inside it
+            # verbatim and drop whatever follows (e.g. a trailing comment).
+            q = val[0]
+            end = val.find(q, 1)
+            val = val[1:end] if end != -1 else val[1:]
+        else:
+            val = re.split(r"\s#", val, 1)[0].rstrip()  # strip an unquoted trailing ' #' comment
         if key and key not in os.environ:
             os.environ[key] = val
     return True

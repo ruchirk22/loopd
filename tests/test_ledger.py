@@ -77,6 +77,42 @@ class TestLedger(unittest.TestCase):
         with self.assertRaises(BudgetExceeded):
             led.spend(0.6, step)
 
+    def test_timeout_cost_floors_at_config_then_tracks_largest_call(self):
+        self.cfg.budget_usd = 100.0
+        self.cfg.timeout_cost_usd = 1.0
+        led = Ledger.load_or_start(self.cfg)
+        # No calls yet: the flat floor applies.
+        self.assertAlmostEqual(led.timeout_cost(), 1.0)
+        led.spend(0.5)  # cheaper than the floor — floor still wins
+        self.assertAlmostEqual(led.timeout_cost(), 1.0)
+        led.spend(4.0)  # a pricey call — timeout estimate rises to match it
+        self.assertAlmostEqual(led.timeout_cost(), 4.0)
+        led.spend(2.0)  # a later cheaper call does not lower the estimate
+        self.assertAlmostEqual(led.timeout_cost(), 4.0)
+        self.assertAlmostEqual(led.state["max_call_cost_usd"], 4.0)
+
+    def test_resume_without_explicit_budget_keeps_stored_budget(self):
+        self.cfg.budget_usd = 7.0
+        led = Ledger.load_or_start(self.cfg)
+        led.start("t")
+        led.spend(1.0)
+        # Resume with a DEFAULT-budget config that did not set --budget explicitly.
+        cfg2 = make_cfg(self.repo)  # budget_usd defaults; budget_explicit is False
+        cfg2.budget_usd = 999.0     # simulate the env default being different
+        led2 = Ledger.load_or_start(cfg2, resume=True)
+        self.assertAlmostEqual(led2.state["budget_usd"], 7.0)  # stored budget carried forward
+        self.assertAlmostEqual(cfg2.budget_usd, 7.0)           # cfg reconciled to it
+
+    def test_resume_with_explicit_budget_overrides_stored(self):
+        self.cfg.budget_usd = 7.0
+        led = Ledger.load_or_start(self.cfg)
+        led.start("t")
+        led.spend(1.0)
+        cfg2 = make_cfg(self.repo, budget_explicit=True)
+        cfg2.budget_usd = 20.0
+        led2 = Ledger.load_or_start(cfg2, resume=True)
+        self.assertAlmostEqual(led2.state["budget_usd"], 20.0)
+
     def test_commit_step_and_no_changes_refused(self):
         led = Ledger.load_or_start(self.cfg)
         step = Step(id="1", goal="add file", acceptance_criteria=["a"], verify=["true"])

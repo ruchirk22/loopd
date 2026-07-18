@@ -82,13 +82,36 @@ class TestMutations(unittest.TestCase):
         with self.assertRaises(PlanValidationError):
             apply_mutations(base, [{"op": "remove", "step": {"id": "1"}}])
 
-    def test_update_resets_attempts_and_original_untouched(self):
+    def test_update_verify_change_resets_caps_original_untouched(self):
         base = apply_mutations(Plan(), [{"op": "add", "step": step_dict("1")}])
         base.steps[0].attempts = 2
-        new = apply_mutations(base, [{"op": "update", "step": {"id": "1", "goal": "sharper"}}])
+        new = apply_mutations(base, [{"op": "update", "step": {"id": "1", "goal": "sharper",
+                                                              "verify": ["pytest -q -k new"]}}])
         self.assertEqual(new.steps[0].goal, "sharper")
-        self.assertEqual(new.steps[0].attempts, 0)
-        self.assertEqual(base.steps[0].goal, "goal 1")  # deep copy: original untouched
+        self.assertEqual(new.steps[0].attempts, 0)          # executed bar changed -> reset
+        self.assertEqual(base.steps[0].goal, "goal 1")      # deep copy: original untouched
+
+    def test_goal_only_edit_applies_but_does_not_reset_caps(self):
+        base = apply_mutations(Plan(), [{"op": "add", "step": step_dict("1")}])
+        base.steps[0].attempts = 2
+        new = apply_mutations(base, [{"op": "update", "step": {"id": "1", "goal": "reworded"}}])
+        self.assertEqual(new.steps[0].goal, "reworded")     # edit applies
+        self.assertEqual(new.steps[0].attempts, 2)          # but caps NOT laundered
+
+    def test_setup_only_edit_is_not_cosmetic(self):
+        base = apply_mutations(Plan(), [{"op": "add", "step": step_dict("1")}])
+        new = apply_mutations(base, [{"op": "update", "step": {"id": "1", "setup": ["docker compose up -d"]}}])
+        self.assertEqual(new.steps[0].setup, ["docker compose up -d"])  # applies, not rejected
+
+    def test_remove_add_across_directives_keeps_caps(self):
+        base = apply_mutations(Plan(), [{"op": "add", "step": step_dict("1")}])
+        base.steps[0].attempts, base.steps[0].rejections = 3, 2
+        after_remove = apply_mutations(base, [{"op": "remove", "step": {"id": "1"}},
+                                              {"op": "add", "step": step_dict("2")}])
+        # separate later directive re-adds the identical step -> caps carried via plan.retired
+        re_added = apply_mutations(after_remove, [{"op": "add", "step": step_dict("1")}])
+        s = re_added.get("1")
+        self.assertEqual((s.attempts, s.rejections), (3, 2))
 
     def test_reorder_keeps_done_relative_order(self):
         base = apply_mutations(Plan(), [{"op": "add", "step": step_dict("1")},

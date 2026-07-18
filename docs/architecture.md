@@ -17,17 +17,25 @@ rules neither agent can override.
 | `orchestrator/handover.py` | Builds the review packet (developer summary + real git diff + gate transcript + integrity flags). |
 | `orchestrator/ledger.py` | Durable state, per-step git commits, run branch, budget enforcement, resume. |
 | `orchestrator/seed.py` | Turns `/handoff`, `--brief`, `--seed-session`, or a task string into `.agentic/brief.md`. |
+| `orchestrator/forecast.py` | Execution Forecast: one cheap model call sizes the work; a deterministic, calibrated estimator turns it into predicted cost/runtime/steps and a recommended budget. Learns from `.agentic/forecasts.jsonl`. |
 | `orchestrator/loop.py` | The control plane that ties it together and enforces every rule. |
 | `orchestrator/memory.py` | Engineering memory: `.agentic/memory.md` the planner reads each run and updates at the end. |
 | `orchestrator/dashboard.py` | Optional local web UI (stdlib `http.server`) to launch and watch runs; reads the same `.agentic/` files. |
 
-## The step lifecycle
+## The run lifecycle
 
 ```
-plan ─▶ [ dispatch ─▶ developer ⇄ gates (inner retries) ─▶ handover ─▶ planner review ] ─▶ finalize
-                                                                            │
-                        accept · reject · replan · descope · abort ◀────────┘
+brief ─▶ forecast ─▶ user decision ─▶ plan ─▶ [ dispatch ─▶ developer ⇄ gates (inner retries)
+                (raise / constrain            ─▶ handover ─▶ planner review ] ─▶ finalize ─▶ grade
+                 / edit / abort)                                     │              (predicted
+                                            accept · reject · replan · descope       vs actual)
+                                                    · abort ◀────────┘
 ```
+
+The forecast runs exactly once, after the brief exists and before planning. On `--resume-run`
+it is skipped (the stored forecast — and any constrained-mode choice — is honored instead).
+At every terminal outcome the run is *graded*: actuals are diffed against the forecast and the
+record is appended to `.agentic/forecasts.jsonl` to calibrate future estimates.
 
 1. **Plan.** The planner (read-only tools), seeded with the brief and the project's
    engineering memory (`.agentic/memory.md`), produces steps, each with `acceptance_criteria`
@@ -74,9 +82,9 @@ Review is grounded in ground truth the agents can't fabricate:
 
 - All state lives under `<repo>/.agentic/`: `state.json` (atomic writes), `log.jsonl`
   (event stream), `handovers/`, `escalation.json` (on failure), `report.md` (a
-  human-readable end-of-run summary written on every outcome), and `memory.md`
-  (engineering memory — persists across `--fresh`). It is excluded from the target repo's
-  history.
+  human-readable end-of-run summary written on every outcome), `memory.md`
+  (engineering memory), and `forecasts.jsonl` (predicted-vs-actual history). `memory.md` and
+  `forecasts.jsonl` persist across `--fresh`. It is excluded from the target repo's history.
 - Each run works on an isolated `agentic/run-<timestamp>` branch, with one commit per
   accepted step — your main branch is never touched.
 - `--resume-run` reloads `state.json` and continues at the first unfinished step. Budget

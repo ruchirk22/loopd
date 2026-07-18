@@ -68,10 +68,32 @@ class Config:
     # knowledge (decisions, failures, TODOs) back to it. Survives --fresh.
     update_memory: bool = field(default_factory=lambda: _env("UPDATE_MEMORY", "1") not in ("0", "false", ""))
 
+    # --- Execution Forecast (a cheap pre-run estimate; see forecast.py) ---
+    forecast_enabled: bool = field(default_factory=lambda: _env("FORECAST_ENABLED", "1") not in ("0", "false", ""))
+    # Deliberately a CHEAP model — the estimate must cost ~nothing next to the run it sizes.
+    # Pinned by full id (aliases float across releases; the pinned id does not).
+    forecast_model: str = field(default_factory=lambda: _env("FORECAST_MODEL", "claude-haiku-4-5-20251001"))
+    forecast_timeout_s: int = field(default_factory=lambda: int(_env("FORECAST_TIMEOUT_S", "300")))
+    forecast_max_turns: int = field(default_factory=lambda: int(_env("FORECAST_MAX_TURNS", "6")))
+    # Estimator coefficients live in forecast.EstimatorConfig (env: FORECAST_*), not here.
+
     # --- Per-run inputs (set by run.py, not env) ---
     brief_path: Optional[Path] = None          # --brief: existing handover brief
     seed_session: Optional[str] = None         # --seed-session: fork an interactive session
     final_verify_extra: List[str] = field(default_factory=list)  # --final-verify (repeatable)
+    # Did this invocation set --budget explicitly? On resume, an explicit --budget overrides
+    # the run's stored budget; otherwise the stored budget is carried forward (so resuming
+    # without --budget can't silently snap a raised budget back to the default). Set by run.py.
+    budget_explicit: bool = False
+    # Forecast decision plumbing (set by run.py from CLI flags):
+    no_forecast: bool = False       # --no-forecast: skip the pre-run estimate entirely
+    assume_yes: bool = False        # --yes: non-interactively accept the recommended budget
+    force: bool = False             # --force: non-interactively proceed at the current budget
+    forecast_only: bool = False     # --forecast-only: print the forecast and exit (no run)
+    # True once the user proceeds under a tightened budget — the planner is told to prioritize
+    # critical work, defer polish, and descope aggressively. Persisted in the forecast so it
+    # survives --resume-run.
+    constrained: bool = False
 
     # Locations (filled in __post_init__)
     state_dir: Path = field(default=None)
