@@ -117,6 +117,23 @@ class TestProbes(unittest.TestCase):
                          "--then", "false", "--timeout", "15"])
         self.assertEqual(rc, 1)
 
+    def test_proc_up_then_check_gets_own_budget_not_starved_by_readiness_wait(self):
+        # The process only prints READY after ~1s, eating into a short --timeout. With a
+        # separate --then-timeout the check still gets its full budget and passes, proving
+        # the readiness wait no longer starves the --then phase.
+        start = ('python3 -c "import time,sys; time.sleep(1); print(\'READY\', flush=True); '
+                 'time.sleep(30)"')
+        rc = probe_main(["proc-up", "--start", start, "--ready-log", "READY",
+                         "--timeout", "5", "--then", "sleep 2 && test -d .",
+                         "--then-timeout", "10"])
+        self.assertEqual(rc, 0)
+
+    def test_proc_up_then_timeout_kills_hung_check(self):
+        start = ('python3 -c "import time; print(\'UP\', flush=True); time.sleep(30)"')
+        rc = probe_main(["proc-up", "--start", start, "--ready-log", "UP",
+                         "--then", "sleep 10", "--then-timeout", "1", "--timeout", "15"])
+        self.assertEqual(rc, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

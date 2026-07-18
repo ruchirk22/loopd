@@ -13,10 +13,11 @@ prompt, reviews every handover); this loop decides what is ALLOWED to happen:
 """
 from __future__ import annotations
 
+import sys
 import time
 from typing import List, Optional, Tuple
 
-from . import developer, gates, memory
+from . import developer, forecast, gates, memory
 from .config import Config
 from .handover import Handover, build_handover
 from .ledger import BudgetExceeded, GitError, Ledger, NoChangesError
@@ -42,6 +43,7 @@ def run(task: Optional[str], cfg: Config, resume: bool = False, fresh: bool = Fa
         print(f"\nStopping on a git error during setup: {exc}\n"
               "Fix the repo state, then retry (--resume-run if a run was in progress).")
         return 1
+    session_t0 = time.time()  # active time of THIS invocation (excludes idle between resumes)
     code, detail = 1, ""
     try:
         code = _run(task, cfg, ledger, resume)
@@ -50,8 +52,11 @@ def run(task: Optional[str], cfg: Config, resume: bool = False, fresh: bool = Fa
         ledger.write_escalation("budget_exceeded", ledger.load_plan(), detail=detail)
         print(f"\n{exc}")
     except PMTurnError as exc:
-        code, detail = 1, str(exc)
-        ledger.write_escalation("pm_turn_failed", ledger.load_plan(), detail=detail)
+        # A PM failure before any plan exists is a setup/plan failure (exit 2), not a
+        # resumable mid-run abort.
+        plan = ledger.load_plan()
+        code, detail = (2 if (plan is None or not plan.steps) else 1), str(exc)
+        ledger.write_escalation("pm_turn_failed", plan, detail=detail)
         print(f"\nStopping: {exc}")
     except RunAborted as exc:
         code, detail = exc.code, str(exc)  # escalation + summary already emitted upstream
@@ -67,15 +72,34 @@ def run(task: Optional[str], cfg: Config, resume: bool = False, fresh: bool = Fa
         print(f"\nStopping on an unexpected error ({type(exc).__name__}): {exc}\n"
               "State is saved — continue with --resume-run.")
     finally:
+        # Accumulate this session's active runtime so a resumed run's actuals exclude the
+        # idle wall-clock between sessions (state['started'] alone would include it).
+        try:
+            ledger.state["active_runtime_s"] = (ledger.state.get("active_runtime_s", 0.0)
+                                                + (time.time() - session_t0))
+            ledger._save()
+        except Exception:
+            pass
         # An end-of-run report on EVERY terminal outcome (success or failure).
         try:
             path = ledger.write_report(ledger.load_plan(), code, detail)
             print(f"\nRun report: {path}")
         except Exception:  # a report must never mask the real exit code
             pass
-        # Record a durable failure note in project memory (skip budget/wall-clock — those
-        # are operational, not project knowledge). Success-path memory is written by the PM.
-        if code not in (0, 3) and cfg.update_memory:
+        # Grade the forecast: attach actuals, append to history, show predicted-vs-actual.
+        # Runs on every terminal outcome (budget-exceeded is exactly where a miss matters).
+        try:
+            graded = ledger.record_forecast_actuals(ledger.load_plan(), code)
+            if graded:
+                predicted, actual = graded
+                print(forecast.render_comparison(predicted, actual))
+        except Exception:  # grading must never mask the real exit code
+            pass
+        # Record a durable failure note in project memory only for genuine mid-run aborts —
+        # skip success (0), setup/plan (2), budget (3), and operational stops like the
+        # wall-clock cap. Success-path memory is written by the PM via task_complete.
+        operational = ledger.state.get("_operational_stop", False)
+        if code not in (0, 2, 3) and not operational and cfg.update_memory:
             try:
                 task = (ledger.state.get("task") or "").strip().splitlines()
                 task = task[0][:80] if task else "task"
@@ -90,7 +114,13 @@ def _run(task: Optional[str], cfg: Config, ledger: Ledger, resume: bool) -> int:
     t0 = time.time()
     if not resume:
         ledger.start(task or "(from brief)")
-    brief = seed.ensure_brief(cfg, ledger, task)
+    brief = seed.ensure_brief(cfg, ledger, task, resume=resume)
+
+    if not resume and ledger.load_plan() is None:
+        _forecast_phase(cfg, ledger, brief)   # may raise RunAborted if the user declines
+    elif resume:
+        _restore_constrained(cfg, ledger)     # re-forecasting is skipped; honor the prior choice
+
     pm = PMSession(cfg, ledger, brief)
 
     plan = ledger.load_plan()
@@ -104,6 +134,7 @@ def _run(task: Optional[str], cfg: Config, ledger: Ledger, resume: bool) -> int:
 
     while True:
         if cfg.max_wall_clock_min and (time.time() - t0) > cfg.max_wall_clock_min * 60:
+            ledger.state["_operational_stop"] = True  # resumable/operational — keep out of memory
             path = ledger.write_escalation("wall_clock_exceeded", plan)
             print("\n" + ledger.report(plan))
             print(f"\nWall-clock cap ({cfg.max_wall_clock_min} min) reached. "
@@ -121,6 +152,100 @@ def _run(task: Optional[str], cfg: Config, ledger: Ledger, resume: bool) -> int:
 
         if ledger.needs_checkpoint():
             _checkpoint(pm, plan, ledger)
+
+
+# --------------------------------------------------------- execution forecast
+
+def _forecast_phase(cfg: Config, ledger: Ledger, brief: str) -> None:
+    """Estimate the run BEFORE planning, show the forecast card, and let the user decide
+    whether to raise the budget, proceed constrained, edit it, or abort. Mutates cfg.budget_usd
+    / ledger.state['budget_usd'] / cfg.constrained per the decision and persists the forecast."""
+    requested_constrained = bool(cfg.constrained)  # an explicit --constrained must never be lost
+    try:
+        fc = forecast.run_forecast(cfg, brief, cfg.budget_usd, ledger=ledger)
+    except BudgetExceeded:
+        # The (cheap) estimate call itself crossed an already-tiny budget. Skip the forecast
+        # and let planning hit the real budget wall — don't stop before showing anything.
+        ledger.log({"event": "forecast_skipped", "reason": "budget"})
+        return
+    if fc is None:
+        return  # forecasting disabled or the estimate failed — proceed exactly as before
+    print(forecast.render_card(fc))
+
+    choice, edited = _forecast_choice(cfg, fc)
+    dec = forecast.apply_choice(fc, choice, edited)
+    if dec.action == "abort":
+        # A cost decision, not an engineering failure: mark it operational so the finally
+        # block doesn't launder it into project memory, and leave a real escalation so the
+        # report's references resolve.
+        ledger.state["_operational_stop"] = True
+        ledger.log({"event": "forecast_aborted"})
+        ledger.write_escalation("forecast_declined", None,
+                                detail="User declined the run at the execution forecast.")
+        raise RunAborted(1, "aborted at the execution forecast")
+
+    # The forecast can only ADD constraint; an explicit --constrained is never downgraded.
+    constrained = dec.constrained or requested_constrained
+    # Apply to BOTH the live rail (cfg.budget_usd, what spend() checks) and the persisted
+    # state (carried forward on --resume-run). Setting only one silently diverges.
+    cfg.budget_usd = dec.budget_usd
+    ledger.state["budget_usd"] = dec.budget_usd
+    cfg.constrained = constrained
+    fc_dict = fc.to_dict()
+    fc_dict["constrained"] = constrained
+    fc_dict["chosen_budget_usd"] = dec.budget_usd
+    ledger.save_forecast(fc_dict)
+    ledger.log({"event": "forecast", "action": dec.action,
+                "predicted_cost": fc.estimated_cost_usd, "budget": dec.budget_usd,
+                "constrained": constrained})
+    if constrained:
+        print(forecast.CONSTRAINED_WARNING)
+
+
+def _forecast_choice(cfg: Config, fc: "forecast.Forecast"):
+    """Resolve the forecast decision to (choice, edited_budget). Flags win; otherwise prompt
+    on a TTY; otherwise proceed at the current budget (never auto-spend, never block CI)."""
+    if not fc.constrained:
+        return "continue", None                      # budget already covers it — just proceed
+    if cfg.assume_yes:
+        return "raise", None
+    if cfg.force:
+        return "continue", None
+    if not sys.stdin.isatty():
+        print("  (non-interactive: proceeding at the current budget in constrained mode — "
+              "pass --yes to raise it to the recommendation, or --budget to set your own.)")
+        return "continue", None
+    return _prompt_forecast(fc)
+
+
+def _prompt_forecast(fc: "forecast.Forecast"):
+    while True:
+        print(f"\n  Increase budget to ${fc.recommended_budget_usd:,.2f}?   "
+              "[Y] raise  ·  [C] continue anyway  ·  [E] edit budget  ·  [A] abort")
+        try:
+            ans = input("  > ").strip().lower()
+        except EOFError:
+            return "continue", None
+        if ans in ("", "y", "yes"):
+            return "raise", None
+        if ans in ("c", "continue"):
+            return "continue", None
+        if ans in ("a", "abort", "q"):
+            return "abort", None
+        if ans in ("e", "edit"):
+            try:
+                return "edit", float(input("  new budget $ ").strip())
+            except (ValueError, EOFError):
+                print("  (not a number)")
+                continue
+        print("  (choose Y, C, E, or A)")
+
+
+def _restore_constrained(cfg: Config, ledger: Ledger) -> None:
+    """On resume we do not re-forecast; honor the constrained choice made on the first run."""
+    fc = ledger.state.get("forecast")
+    if isinstance(fc, dict) and fc.get("constrained"):
+        cfg.constrained = True
 
 
 # --------------------------------------------------------------- phases
@@ -278,7 +403,8 @@ def _inner_dev_loop(prompt: str, resume_sid: Optional[str], original_prompt: str
         step.attempts += 1
         ledger.save_plan(plan)
         print(f"   dev attempt {step.attempts}…")
-        res = developer.run_prompt(prompt, cfg, resume_session=sid)
+        res = developer.run_prompt(prompt, cfg, resume_session=sid,
+                                   timeout_cost_usd=ledger.timeout_cost())
         # Persist the session id BEFORE charging (for both ok and error), so a budget stop
         # resumes the right dev session rather than a stale one.
         if res.session_id:

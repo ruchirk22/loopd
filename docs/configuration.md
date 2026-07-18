@@ -39,15 +39,21 @@ How the planner gets its context (in order of fidelity):
 | `--fresh` | Archive prior run state and start over. |
 | `--budget <usd>` | Override `BUDGET_USD` for this run. |
 | `--final-verify <cmd>` | Extra command required in final verification (repeatable). |
+| `--forecast-only` | Print the Execution Forecast and exit without running. |
+| `--json` | With `--forecast-only`, emit the forecast as JSON instead of a card. |
+| `--no-forecast` | Skip the pre-run forecast and start immediately. |
+| `-y`, `--yes` | Non-interactively accept the recommended budget if the estimate exceeds it. |
+| `--force` | Non-interactively proceed at the current budget (constrained if the estimate is short). |
+| `--constrained` | Force budget-constrained planning (prioritize critical work, defer polish). |
 
-Exit codes: `0` verified done · `1` stopped with a report · `2` setup/plan failure ·
-`3` budget exceeded (resumable). Every run writes a summary to `.agentic/report.md`; a
-non-zero stop also writes `.agentic/escalation.json`.
+Exit codes: `0` verified done · `1` stopped with a report (or declined at the forecast) ·
+`2` setup/plan failure · `3` budget exceeded (resumable). Every run writes a summary to
+`.agentic/report.md`; a non-zero stop also writes `.agentic/escalation.json`.
 
 ## Dashboard
 
 `python3 dashboard.py` starts the local web UI to launch and watch runs
-([usage](usage.md#4-the-web-dashboard-browser-ui)).
+([usage](usage.md#5-the-web-dashboard-browser-ui)).
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -78,7 +84,22 @@ All optional; defaults shown.
 | `MAX_REPLANS` | `3` | plan revisions (and failed finalizations) before stopping |
 | `MAX_TURNS_PER_CALL` | `40` | agent turns per CLI call |
 | `MAX_WALL_CLOCK_MIN` | `0` | wall-clock cap; `0` = none |
-| `TIMEOUT_COST_USD` | `1.0` | budget charged when a CLI call times out |
+| `TIMEOUT_COST_USD` | `1.0` | floor charged when a CLI call times out (a killed call reports $0); rises to the largest real per-call cost seen so repeated timeouts can't blow past the budget |
+
+### Execution Forecast
+| Variable | Default | Meaning |
+|---|---|---|
+| `FORECAST_ENABLED` | `1` | run the cheap pre-run estimate; `0` disables it |
+| `FORECAST_MODEL` | `claude-haiku-4-5-20251001` | the model for the single estimate call — kept cheap on purpose |
+| `FORECAST_TIMEOUT_S` | `300` | timeout for the estimate call |
+| `FORECAST_MAX_TURNS` | `6` | lets the estimator shallow-skim the repo, not read everything |
+| `FORECAST_<COEFFICIENT>` | (see `forecast.EstimatorConfig`) | every estimator coefficient is overridable, e.g. `FORECAST_COST_PER_DEV_CALL_USD`, `FORECAST_BASE_CONTINGENCY` |
+
+The dollars/minutes are computed by a **deterministic** estimator (`forecast.WeightedEstimator`)
+from the model's engineering-work estimate — the model never emits money or time. Every finished
+run appends a predicted-vs-actual record to `.agentic/forecasts.jsonl`, and the estimator folds
+the resulting calibration factor back in so its numbers get truer over time. See
+[usage](usage.md#3-the-execution-forecast) and `orchestrator/forecast.py`.
 
 ### Context, handover, timeouts
 | Variable | Default |
@@ -114,3 +135,7 @@ python3 -m orchestrator.probe proc-up --start "npm run preview -- --port 4173" \
 ```
 
 A long-running check can carry its own timeout: `timeout=900;npm run build`.
+
+`proc-up` waits for readiness (`--ready-log`/`--ready-port`, bounded by `--timeout`), then
+runs each `--then` check. Each `--then` gets its own budget — `--then-timeout <sec>` if set,
+otherwise `--timeout` — so a slow startup can never starve the checks that follow it.

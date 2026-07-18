@@ -192,7 +192,8 @@ def probe_proc_up(args) -> int:
         print(f"PROBE: process is up ({args.start[:80]!r})")
         for cmd in args.then or []:
             print(f"PROBE THEN: $ {cmd}")
-            remaining = max(1, int(deadline - time.time()))
+            # Each --then check gets its own full budget — readiness wait must not starve it.
+            remaining = args.then_timeout if args.then_timeout else args.timeout
             # Own process group so a hung --then (e.g. playwright spawning browsers)
             # is fully killed on timeout instead of leaking grandchildren.
             tp = subprocess.Popen(cmd, shell=True, cwd=args.cwd or None, start_new_session=True,
@@ -252,7 +253,8 @@ def main(argv=None) -> int:
     p.add_argument("--ready-port", type=int, default=0, help="port that signals readiness when open")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--then", action="append", default=[], help="check command to run while up (repeatable)")
-    p.add_argument("--timeout", type=int, default=120)
+    p.add_argument("--timeout", type=int, default=120, help="readiness timeout (also the default per --then budget)")
+    p.add_argument("--then-timeout", type=int, default=0, help="separate timeout for each --then check (0 = use --timeout)")
     p.add_argument("--interval", type=float, default=0.5)
     p.set_defaults(fn=probe_proc_up)
 

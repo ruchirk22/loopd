@@ -56,6 +56,11 @@ def _run_one(cmd: str, cwd: Path, timeout_s: int, logs: List[str]) -> bool:
             logs.append(out.rstrip())
         logs.append(f"[TIMEOUT after {per_timeout}s — process group killed]")
         return False
+    finally:
+        # Reap any process the command backgrounded (`cmd &`, a spawned server) so it can't
+        # leak into later gates or the pristine final sweep. No-op if the group is empty.
+        if not _group_gone(proc.pid):
+            _kill_group(proc)
     if out and out.strip():
         logs.append(out.rstrip())
     if proc.returncode != 0:

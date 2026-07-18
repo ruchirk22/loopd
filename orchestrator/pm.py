@@ -124,7 +124,6 @@ _BANNED_EVIDENCE = {"all gates passed", "gates failed", "gate verdict", "ground 
                     "self-reported", "verify against the diff",
                     "test session starts", "collected", "rootdir", "platform"}
 _BANNED_RE = re.compile(r"^(=+|-+|\d+ passed.*|\d+ failed.*|collected \d+ items?.*)$")
-_MIN_QUOTE = 12
 # Generic markers only. NOTE: `$ <cmd>` gate-command lines are NOT scaffolding — for
 # assertion-style checks that print nothing on success (python3 -c "assert ...", test -f x),
 # the command line is the ONLY per-criterion evidence, and since accept is offered only when
@@ -284,11 +283,21 @@ class PMSession:
             "You are joining (or re-joining) an in-progress automated build run as its PM. "
             "Everything you need is below; the orchestrator enforces the rails.",
         ]
-        mem = memory.as_prompt(self.cfg.repo)
+        mem = memory.as_prompt(self.cfg.repo) if self.cfg.update_memory else ""
         if mem:
             parts.append("\n## Project memory (loopd) — honor these decisions, avoid the past "
                          "failures, consider the TODOs\n" + mem)
         parts.append("\n## Task brief\n" + self.brief)
+        if getattr(self.cfg, "constrained", False):
+            parts.append(
+                "\n## BUDGET-CONSTRAINED EXECUTION (the owner chose to proceed under a tight budget)\n"
+                "Treat the budget as a hard PLANNING constraint, not just a kill switch. You MUST:\n"
+                "- prioritize the critical acceptance criteria first (highest-value work early);\n"
+                "- keep the plan as short as possible — prefer fewer, larger steps;\n"
+                "- defer optional improvements, polish, and non-essential refactors;\n"
+                "- descope aggressively (with a stated impact) rather than risk running out mid-step;\n"
+                "- aim to finish the most high-value work that fits, so a budget stop still leaves a "
+                "coherent, working result.")
         ckpt = self.ledger.state.get("checkpoint")
         if ckpt:
             parts.append(
@@ -336,7 +345,7 @@ class PMSession:
                 json_schema=schema,
                 max_turns=self.cfg.max_turns_per_call,
                 timeout_s=self.cfg.call_timeout_s,
-                timeout_cost_usd=self.cfg.timeout_cost_usd,
+                timeout_cost_usd=self.ledger.timeout_cost(),
             )
             # Persist the session id BEFORE charging, so a budget stop still resumes the
             # right session and doesn't re-pay for this turn.

@@ -59,9 +59,19 @@ def _atom_class(clause: str) -> str:
     if toks and toks[0] == "!":
         inner = _atom_class(" ".join(shlex.quote(t) for t in toks[1:]))
         return {ZERO: NONZERO, NONZERO: ZERO, DEPENDS: DEPENDS}[inner]
-    # Drop NAME=value assignment prefixes and wrapper words.
-    while toks and (re.match(r"^[A-Za-z_]\w*=", toks[0]) or _base_exe(toks[0]) in _WRAPPERS):
-        toks = toks[1:]
+    # Drop NAME=value assignment prefixes and wrapper words — but `NAME=$(cmd)` / backticks
+    # take cmd's exit status, so they DEPEND (not a no-op).
+    while toks:
+        m = re.match(r"^[A-Za-z_]\w*=(.*)$", toks[0])
+        if m:
+            if "$(" in m.group(1) or "`" in m.group(1):
+                return DEPENDS
+            toks = toks[1:]
+            continue
+        if _base_exe(toks[0]) in _WRAPPERS:
+            toks = toks[1:]
+            continue
+        break
     if not toks:
         return ZERO  # bare assignments / `env` with no command
     exe = _base_exe(toks[0])
@@ -92,6 +102,11 @@ def _test_class(args: List[str]) -> str:
     rest = " ".join(args).strip()
     if rest in _ALWAYS_TRUE_TEST:
         return ZERO
+    if len(args) == 1 and _is_literal(args[0]):
+        return ZERO  # `[ WORD ]` with a non-empty literal is constant true
+    if len(args) == 2 and args[0] in ("-n", "-z") and _is_literal(args[1]):
+        nonempty = bool(args[1])  # a literal token is non-empty
+        return ZERO if (args[0] == "-n") == nonempty else NONZERO
     if len(args) == 3 and _is_literal(args[0]) and _is_literal(args[2]):
         a, op, b = args
         if op in ("=", "=="):
@@ -156,18 +171,20 @@ def _unwrap(expr: str) -> str:
     return e
 
 
-def _expr_class(expr: str, set_e: bool = False) -> str:
-    expr = _unwrap(expr.strip())
-    if not expr:
+def _segment_class(seg: str) -> str:
+    """Exit class of one `;`-free segment: handle background `&`, then fold && / ||."""
+    seg = _unwrap(seg.strip())
+    if not seg:
         return ZERO
-    # `set -e` in a leading segment makes every later segment's failure propagate.
-    segs = [s for s in re.split(r"[;\n]", expr) if s.strip()]
-    if len(segs) > 1:
-        if re.match(r"^set\s+-\w*e", segs[0].strip()):
-            return _seq_class(segs[1:], set_e=True)
-        return _seq_class(segs, set_e=set_e)
-    # Single segment: fold && / || left-to-right.
-    parts = re.split(r"(&&|\|\|)", expr)
+    # Async list `a & b`: the preceding commands are backgrounded; the exit status is the
+    # last FOREGROUND command. A trailing lone `&` (nothing after) means it exits 0.
+    amp = re.split(r"(?<!&)&(?!&)", seg)
+    if len(amp) > 1:
+        fg = amp[-1].strip()
+        if not fg:
+            return ZERO  # `cmd &` — backgrounded, returns 0 immediately
+        seg = fg
+    parts = re.split(r"(&&|\|\|)", seg)
     cls = _pipe_class(parts[0])
     i = 1
     while i < len(parts) - 1:
@@ -177,13 +194,27 @@ def _expr_class(expr: str, set_e: bool = False) -> str:
     return cls
 
 
+def _expr_class(expr: str, set_e: bool = False) -> str:
+    expr = _unwrap(expr.strip())
+    if not expr:
+        return ZERO
+    # `;`/newline sequence — only the last segment sets the status (unless `set -e`).
+    segs = [s for s in re.split(r"[;\n]", expr) if s.strip()]
+    if not segs:
+        return ZERO
+    if len(segs) > 1:
+        if re.match(r"^set\s+-\w*e", segs[0].strip()):
+            return _seq_class(segs[1:], set_e=True)
+        return _seq_class(segs, set_e=set_e)
+    return _segment_class(segs[0])
+
+
 def _seq_class(segs, set_e: bool) -> str:
     if not set_e:
-        return _expr_class(segs[-1])  # only the last segment sets the status
-    # Under set -e the sequence behaves like an && chain.
-    cls = _expr_class(segs[0])
+        return _segment_class(segs[-1])  # only the last segment sets the status
+    cls = _segment_class(segs[0])         # under set -e, behaves like an && chain
     for s in segs[1:]:
-        cls = _combine_and(cls, _expr_class(s))
+        cls = _combine_and(cls, _segment_class(s))
     return cls
 
 
@@ -271,6 +302,9 @@ class Step:
 class Plan:
     summary: str = ""
     steps: List[Step] = field(default_factory=list)
+    # Retired step counters (sig-key -> [attempts, rejections]) so a remove+re-add of the
+    # same step can't launder the retry caps, even across separate replan directives.
+    retired: dict = field(default_factory=dict)
 
     def next_pending(self) -> Optional[Step]:
         for s in self.steps:
@@ -288,12 +322,14 @@ class Plan:
         return [s for s in self.steps if s.status == DONE]
 
     def to_dict(self) -> dict:
-        return {"summary": self.summary, "steps": [asdict(s) for s in self.steps]}
+        return {"summary": self.summary, "steps": [asdict(s) for s in self.steps],
+                "retired": self.retired}
 
     @classmethod
     def from_dict(cls, d: dict) -> "Plan":
         return cls(summary=d.get("summary", ""),
-                   steps=[Step.from_dict(s) for s in d.get("steps", [])])
+                   steps=[Step.from_dict(s) for s in d.get("steps", [])],
+                   retired=dict(d.get("retired") or {}))
 
     def digest(self) -> str:
         """One line per step — the ledger digest used to seed reincarnated PM sessions."""
@@ -342,10 +378,10 @@ def validate(plan: Plan) -> List[str]:
     return problems
 
 
-def _sig(step: Step) -> tuple:
-    """Identity for carry-over: normalized goal + verify (not counters/status)."""
-    return (" ".join(step.goal.split()),
-            tuple(" ".join(v.split()) for v in step.verify))
+def _sig_key(step: Step) -> str:
+    """Stable string identity for carry-over: normalized goal + verify (not counters)."""
+    return "␟".join([" ".join(step.goal.split())]
+                         + [" ".join(v.split()) for v in step.verify])
 
 
 def apply_mutations(plan: Plan, ops: List[dict]) -> Plan:
@@ -353,16 +389,15 @@ def apply_mutations(plan: Plan, ops: List[dict]) -> Plan:
     Done/skipped steps are immutable. Raises PlanValidationError on any problem."""
     new = copy.deepcopy(plan)
     problems: List[str] = []
-    removed_counters: dict = {}  # signature -> (attempts, rejections), for remove+add laundering
 
     for op in ops or []:
         kind = (op.get("op") or "").strip()
         if kind == "add":
             step = Step.from_dict(op.get("step") or {})
             step.status = PENDING
-            carried = removed_counters.get(_sig(step))
-            if carried:  # re-adding a just-removed identical step keeps its spent caps
-                step.attempts, step.rejections = carried
+            carried = new.retired.pop(_sig_key(step), None)  # persists across directives/resume
+            if carried:  # re-adding a previously-removed identical step keeps its spent caps
+                step.attempts, step.rejections = int(carried[0]), int(carried[1])
             after_id = op.get("after_id")
             if after_id:
                 idx = next((i for i, s in enumerate(new.steps) if s.id == after_id), None)
@@ -381,16 +416,18 @@ def apply_mutations(plan: Plan, ops: List[dict]) -> Plan:
             if target.status in (DONE, SKIPPED):
                 problems.append(f"update: step {target.id!r} is {target.status} and immutable")
                 continue
-            def _all_fields(s: Step) -> tuple:
-                return (" ".join(s.goal.split()),
-                        tuple(" ".join(c.split()) for c in s.acceptance_criteria),
-                        tuple(" ".join(v.split()) for v in s.verify))
+            def _norm_list(xs):
+                return tuple(" ".join(str(x).split()) for x in xs)
 
-            def _exec_fields(s: Step) -> tuple:
-                # the bar the developer must actually clear: goal + verify commands
-                return (" ".join(s.goal.split()), tuple(" ".join(v.split()) for v in s.verify))
+            def _all_fields(s: Step) -> tuple:  # every editable field — for the no-op check
+                return (" ".join(s.goal.split()), " ".join(s.details.split()),
+                        _norm_list(s.acceptance_criteria), _norm_list(s.verify),
+                        _norm_list(s.setup), _norm_list(s.teardown))
 
-            all_before, exec_before = _all_fields(target), _exec_fields(target)
+            def _bar_fields(s: Step) -> tuple:  # the executed gate bar — for the cap reset
+                return (_norm_list(s.verify), _norm_list(s.setup), _norm_list(s.teardown))
+
+            all_before, bar_before = _all_fields(target), _bar_fields(target)
             for key in ("goal", "details"):
                 if key in patch and patch[key] is not None:
                     setattr(target, key, str(patch[key]))
@@ -401,12 +438,12 @@ def apply_mutations(plan: Plan, ops: List[dict]) -> Plan:
                         val = [val]
                     setattr(target, key, [str(v) for v in val])
             if _all_fields(target) == all_before:
-                problems.append(f"update: step {target.id!r} does not change goal, acceptance "
-                                "criteria, or verify — a cosmetic edit cannot reset the retry caps")
+                problems.append(f"update: step {target.id!r} changes nothing — an empty edit "
+                                "cannot reset the retry caps")
                 continue
-            # A clean retry slate only when the EXECUTED bar (goal/verify) changed — editing
-            # acceptance_criteria alone is allowed but must not launder the retry caps.
-            if _exec_fields(target) != exec_before:
+            # A clean retry slate ONLY when the executed bar (verify/setup/teardown) changed;
+            # editing goal/criteria/details alone applies but must not launder the caps.
+            if _bar_fields(target) != bar_before:
                 target.attempts = 0
                 target.rejections = 0
         elif kind == "remove":
@@ -419,7 +456,7 @@ def apply_mutations(plan: Plan, ops: List[dict]) -> Plan:
                 problems.append(f"remove: step {sid!r} is {target.status} and immutable")
                 continue
             if target.attempts or target.rejections:  # so a remove+re-add can't launder caps
-                removed_counters[_sig(target)] = (target.attempts, target.rejections)
+                new.retired[_sig_key(target)] = [target.attempts, target.rejections]
             new.steps.remove(target)
         elif kind == "reorder":
             order = [str(x) for x in (op.get("order") or [])]

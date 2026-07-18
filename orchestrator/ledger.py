@@ -98,7 +98,12 @@ class Ledger:
         if led.state_path.exists():
             if resume:
                 led.state = led._load_valid_state()
-                led.state["budget_usd"] = cfg.budget_usd  # reflect this invocation's --budget
+                # Explicit --budget overrides the stored budget; otherwise carry the prior
+                # run's budget forward so a raised budget doesn't snap back to the default.
+                if cfg.budget_explicit:
+                    led.state["budget_usd"] = cfg.budget_usd
+                else:
+                    cfg.budget_usd = float(led.state.get("budget_usd", cfg.budget_usd))
                 led.state["pm_model"] = cfg.pm_model
                 led.state["dev_model"] = cfg.dev_model
                 led._ensure_git(resume=True)
@@ -126,6 +131,7 @@ class Ledger:
             "task": "",
             "started": time.time(),
             "total_cost_usd": 0.0,
+            "max_call_cost_usd": 0.0,
             "budget_usd": cfg.budget_usd,
             "pm_model": cfg.pm_model,
             "dev_model": cfg.dev_model,
@@ -138,6 +144,7 @@ class Ledger:
             "review_turns_since_ckpt": 0,
             "handover_bytes": 0,
             "finished": False,
+            "forecast": None,   # Execution Forecast (predicted; 'actual' filled at the end)
         }
         led._save()
         return led
@@ -161,6 +168,8 @@ class Ledger:
             raise StateConflict(f"the run in {self.state_path} already finished; nothing to resume "
                                 "(use --fresh for a new run).")
         state.setdefault("total_cost_usd", 0.0)
+        state.setdefault("max_call_cost_usd", 0.0)
+        state.setdefault("forecast", None)  # additive/optional: old in-flight runs lack it
         return state
 
     def start(self, task: str) -> None:
@@ -190,7 +199,13 @@ class Ledger:
         if resume:
             ref = self.state.get("branch") if self.state else None
             if ref and self._current_ref() != ref:
-                _git(["checkout", ref], self.repo)
+                # Never move HEAD backwards onto a bare SHA whose descendants are the run's
+                # accepted commits — that would orphan them. Only check out when the current
+                # HEAD does NOT already contain the stored ref (genuinely a different place).
+                contains = _git(["merge-base", "--is-ancestor", ref, "HEAD"],
+                                self.repo, check=False).returncode == 0
+                if not contains:
+                    _git(["checkout", ref], self.repo)
             return
         dirty = bool(_git(["status", "--porcelain"], self.repo, check=False).stdout.strip())
         if self.cfg.use_run_branch:
@@ -286,8 +301,10 @@ class Ledger:
             return  # a done step's commit is in the range — don't destroy it
         bundle = self.cfg.state_dir / "discarded" / f"reverted-{time.strftime('%Y%m%d-%H%M%S')}"
         bundle.mkdir(parents=True, exist_ok=True)
-        (bundle / "reverted.diff").write_text(
-            _git(["diff", base, head], self.repo, check=False).stdout, errors="replace")
+        # --binary bytes so binary/non-UTF-8 content in the reverted commits is recoverable.
+        diff_bytes = subprocess.run(["git", *_GIT_SAFE, "diff", base, head, "--binary"],
+                                    cwd=str(self.repo), capture_output=True).stdout
+        (bundle / "reverted.diff").write_bytes(diff_bytes)
         _git(["reset", "--hard", base], self.repo)
         self.log({"event": "unclaimed_commits_reverted", "step": step.id, "reason": reason,
                   "count": len(revs), "bundle": str(bundle)})
@@ -320,6 +337,7 @@ class Ledger:
                       "untracked_saved": len(untracked)})
         _git(["reset", "--hard", "HEAD"], self.repo)
         _git(["clean", "-fd"], self.repo)  # -fd (not -x): keeps ignored files incl. .agentic/
+        self.clear_pending_commit()  # no commit is in flight past a reset
 
     def _untracked_files(self) -> List[str]:
         out = _git(["ls-files", "--others", "--exclude-standard", "-z"], self.repo, check=False).stdout
@@ -379,6 +397,8 @@ class Ledger:
     def spend(self, cost: float, step: Optional[Step] = None) -> None:
         cost = float(cost or 0.0)
         self.state["total_cost_usd"] += cost
+        if cost > self.state.get("max_call_cost_usd", 0.0):
+            self.state["max_call_cost_usd"] = cost
         if step is not None:
             step.cost_usd += cost
         self._save()
@@ -388,6 +408,13 @@ class Ledger:
                 f"Budget ${self.cfg.budget_usd:.2f} exceeded "
                 f"(spent ${self.state['total_cost_usd']:.2f}). "
                 "Raise BUDGET_USD/--budget and re-run with --resume-run to continue.")
+
+    def timeout_cost(self) -> float:
+        """What to charge for a call that timed out (we get no real bill from a killed
+        process). The flat TIMEOUT_COST_USD is a floor; once real calls have shown they
+        cost more, charge the largest observed call cost so repeated timeouts on an
+        expensive model can't quietly run the budget far past its cap."""
+        return max(float(self.cfg.timeout_cost_usd), float(self.state.get("max_call_cost_usd", 0.0)))
 
     # ---------- plan / PM session / checkpoint ----------
 
@@ -400,6 +427,13 @@ class Ledger:
 
     def set_pm_session(self, session_id: Optional[str]) -> None:
         self.state["pm_session_id"] = session_id
+        self._save()
+
+    def save_forecast(self, forecast: dict) -> None:
+        """Persist the Execution Forecast (a forecast.Forecast.to_dict(), plus the chosen
+        budget/constrained flag). Survives resume so we never re-forecast, and so the actuals
+        can be diffed against it at the end."""
+        self.state["forecast"] = forecast
         self._save()
 
     def save_checkpoint(self, ckpt: dict) -> None:
@@ -431,11 +465,22 @@ class Ledger:
             f.write(json.dumps(event) + "\n")
 
     def _save(self) -> None:
-        # Atomic: a crash mid-write must never corrupt run state.
+        # Atomic AND durable: fsync the temp file and the directory so a power/OS crash
+        # can't leave state.json truncated or reverted after the rename.
         fd, tmp = tempfile.mkstemp(dir=str(self.cfg.state_dir), prefix=".state-", suffix=".tmp")
         with os.fdopen(fd, "w") as f:
             json.dump(self.state, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, self.state_path)
+        try:
+            dfd = os.open(str(self.cfg.state_dir), os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+        except OSError:
+            pass
 
     def report(self, plan: Optional[Plan]) -> str:
         lines = [f"Run report | total cost ${self.state.get('total_cost_usd', 0.0):.4f} "
@@ -528,3 +573,72 @@ class Ledger:
         path.write_text("\n".join(lines) + "\n")
         self.log({"event": "report_written", "code": code})
         return path
+
+    # ---------- forecast actuals ----------
+
+    def _run_files_changed(self, plan: Optional[Plan]) -> int:
+        """Count of distinct files changed across the run, as the UNION of each done step's
+        own base_sha..commit_sha diff. Order-independent (a PM reorder can't corrupt it) and
+        immune to diff_against_head's working-tree emptiness once steps are committed."""
+        if not plan:
+            return 0
+        files = set()
+        for s in plan.steps:
+            if s.status == DONE and s.base_sha and s.commit_sha:
+                out = _git(["diff", s.base_sha, s.commit_sha, "--name-only"],
+                           self.repo, check=False).stdout
+                files.update(f for f in out.splitlines() if f.strip())
+        return len(files)
+
+    def run_actuals(self, plan: Optional[Plan]) -> dict:
+        """Measured facts about the run so far, for comparison against the forecast."""
+        st = self.state
+        # Prefer accumulated active runtime (excludes idle time between resume sessions);
+        # fall back to wall-clock since start for a run that never went through the finally.
+        active = st.get("active_runtime_s")
+        if active is None:
+            started = st.get("started")
+            active = (time.time() - started) if started else 0.0
+        runtime_min = round(active / 60.0, 1)
+        steps = plan.steps if plan else []
+        return {
+            "cost_usd": round(float(st.get("total_cost_usd", 0.0)), 4),
+            "runtime_min": runtime_min,
+            "steps_done": len([s for s in steps if s.status == DONE]),
+            "steps_total": len(steps),
+            "attempts": sum(s.attempts for s in steps),
+            "retries": sum(max(0, s.attempts - 1) for s in steps),
+            "rejections": sum(s.rejections for s in steps),
+            "replans": int(st.get("replans_used", 0)),
+            "files_changed": self._run_files_changed(plan),
+        }
+
+    def record_forecast_actuals(self, plan: Optional[Plan], code: int):
+        """If a forecast was made, attach the actuals to it, persist, and append a
+        predicted-vs-actual record to the cross-run history. Returns (predicted, actual) for
+        rendering, or None if there was no forecast. Never raises fatally to the caller."""
+        fc = self.state.get("forecast")
+        if not isinstance(fc, dict):
+            return None
+        from . import forecast as _forecast  # local import avoids any import-order coupling
+        actual = self.run_actuals(plan)
+        fc["actual"] = actual
+        self.state["forecast"] = fc
+        self._save()
+        task_lines = (self.state.get("task") or "").strip().splitlines()
+        record = {
+            "ts": time.time(),
+            # A stable id for this logical run (survives resume) so history consumers can
+            # keep one record per run — a resumed run overwrites its earlier partial row.
+            "run_id": self.state.get("started"),
+            "task": task_lines[0][:200] if task_lines else "",
+            "code": code,
+            "run_success": code == 0,
+            "predicted": {k: v for k, v in fc.items() if k not in ("actual",)},
+            "actual": actual,
+        }
+        try:
+            _forecast.ForecastHistory(self.cfg.repo).append(record)
+        except OSError:
+            pass
+        return fc, actual

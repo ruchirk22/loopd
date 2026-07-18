@@ -24,7 +24,8 @@ DEV_SUMMARY_SCHEMA = {
 }
 
 
-def run_prompt(prompt: str, cfg: Config, resume_session: Optional[str] = None) -> ClaudeResult:
+def run_prompt(prompt: str, cfg: Config, resume_session: Optional[str] = None,
+               timeout_cost_usd: Optional[float] = None) -> ClaudeResult:
     return run_claude(
         prompt,
         cwd=cfg.repo,
@@ -36,7 +37,7 @@ def run_prompt(prompt: str, cfg: Config, resume_session: Optional[str] = None) -
         json_schema=DEV_SUMMARY_SCHEMA,
         max_turns=cfg.max_turns_per_call,
         timeout_s=cfg.call_timeout_s,
-        timeout_cost_usd=cfg.timeout_cost_usd,
+        timeout_cost_usd=cfg.timeout_cost_usd if timeout_cost_usd is None else timeout_cost_usd,
     )
 
 

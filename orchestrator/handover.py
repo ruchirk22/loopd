@@ -7,6 +7,7 @@ a no-op diff, test files touched, or files referenced by the verify commands tou
 from __future__ import annotations
 
 import re
+import shlex
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -19,9 +20,16 @@ _TEST_PATH = re.compile(r"(^|/)(tests?|__tests__|spec)(/|$)|(^|/|_)test[_.]|[_.]
 # Files that DEFINE what a gate command actually runs (npm test -> package.json, etc.).
 # Editing these games the gate without touching the verify string, so substring
 # matching misses it — flag them by name.
-_GATE_CONFIG = re.compile(r"(^|/)(package\.json|Makefile|GNUmakefile|pyproject\.toml|setup\.cfg|"
-                          r"pytest\.ini|tox\.ini|conftest\.py|\.mocharc[.\w]*|jest\.config[.\w]*|"
-                          r"\.pre-commit-config\.yaml|noxfile\.py|justfile)$", re.IGNORECASE)
+_GATE_CONFIG = re.compile(
+    r"(^|/)("
+    r"package\.json|Makefile|GNUmakefile|justfile|"
+    r"pyproject\.toml|setup\.cfg|pytest\.ini|tox\.ini|conftest\.py|noxfile\.py|"
+    r"jest\.config[.\w]*|vitest\.config[.\w]*|playwright\.config[.\w]*|cypress\.config[.\w]*|"
+    r"karma\.conf[.\w]*|\.mocharc[.\w]*|\.eslintrc[.\w]*|eslint\.config[.\w]*|"
+    r"babel\.config[.\w]*|\.babelrc[.\w]*|"
+    r"Cargo\.toml|go\.mod|build\.gradle[.\w]*|settings\.gradle[.\w]*|pom\.xml|build\.sbt|"
+    r"\.pre-commit-config\.ya?ml|\.github/workflows/[\w.-]+\.ya?ml"
+    r")$", re.IGNORECASE)
 
 
 @dataclass
@@ -50,9 +58,16 @@ def _integrity_flags(diff: dict, verify_cmds: List[str], tests_expected: bool):
         high_risk = True
         flags.append(f"TESTS_TOUCHED: test files changed ({', '.join(touched_tests[:8])}) — "
                      "confirm they were strengthened, not weakened, to make gates pass.")
-    verify_blob = "\n".join(verify_cmds)
+    # Tokenize the verify commands (shell words) and match whole paths/basenames against
+    # those tokens — not raw substring, so `server.py` isn't flagged by `test_server.py`.
+    verify_tokens = set()
+    for cmd in verify_cmds:
+        try:
+            verify_tokens.update(shlex.split(cmd, comments=True))
+        except ValueError:
+            verify_tokens.update(cmd.split())
     gate_targets = [f for f in diff["changed_files"]
-                    if f and (f in verify_blob or (f.rsplit("/", 1)[-1] in verify_blob and len(f.rsplit("/", 1)[-1]) > 6))]
+                    if f and (f in verify_tokens or f.rsplit("/", 1)[-1] in verify_tokens)]
     if gate_targets:
         high_risk = True
         flags.append(f"GATE_TARGETS_TOUCHED: files referenced by the verify commands were modified "

@@ -65,7 +65,91 @@ python3 run.py --seed-session <session-id> --repo ../my-app
 `--repo` is always required. Point it at an **empty directory** to start a project from
 scratch (loopd runs `git init` for you) or at an **existing repo** to build on.
 
-## 3. Run it safely
+Precedence when several sources are present: `--brief` and `--seed-session` always win.
+Otherwise, on a fresh run inline/`@spec` task text is authoritative and (re)writes
+`.agentic/brief.md` — so a leftover brief from a previous task can't silently override a new
+one. On `--resume-run` the brief written at the start of that run is kept as-is.
+
+## 3. The Execution Forecast
+
+Before it starts building, loopd estimates the job — the way a senior engineer would size a
+ticket before touching the keyboard. One **cheap** model call sizes the *engineering work*
+(steps, complexity, risk, expected retries/replans, verification needs, confidence); a
+**deterministic** estimator then turns that into a predicted cost, runtime, and a recommended
+budget. The model never invents dollars or minutes — those come from named coefficients in
+`orchestrator/forecast.py`, so the numbers are reproducible, not hallucinated.
+
+```
+Analyzing task…
+
+  ┌─────────────────────────────────────────────┐
+  │              EXECUTION FORECAST              │
+  └─────────────────────────────────────────────┘
+
+  Estimated Cost     $28.86
+  Estimated Runtime  71 min
+  Estimated Steps    11
+  Confidence         83%   ██████████████████░░░░
+  Risk               Medium
+
+  Current Budget     $25.00
+  Budget Gap        +$3.86  (short — see options below)
+  Recommended        $40.00  (room for retries)
+```
+
+If the estimate exceeds your budget, loopd asks what to do (on a terminal):
+
+```
+  Increase budget to $40.00?   [Y] raise  ·  [C] continue anyway  ·  [E] edit budget  ·  [A] abort
+```
+
+- **Raise** (the default) runs at the recommended budget — enough headroom for retries.
+- **Continue anyway** runs in **constrained mode**: the planner prioritizes the critical
+  acceptance criteria, defers polish and optional refactors, and finishes the highest-value
+  work first — so a budget stop still leaves a coherent result. It may stop before *every*
+  criterion is met.
+- **Edit** sets your own budget; **Abort** stops before spending.
+
+Flags let you skip the prompt (CI, Docker, the dashboard):
+
+```bash
+python3 run.py "Build OAuth" --repo ../svc --forecast-only   # just estimate, don't run
+python3 run.py "Build OAuth" --repo ../svc --forecast-only --json   # machine-readable
+python3 run.py "Build OAuth" --repo ../svc --yes             # accept the recommended budget
+python3 run.py "Build OAuth" --repo ../svc --force           # proceed at the current budget (constrained if short)
+python3 run.py "Build OAuth" --repo ../svc --constrained     # force constrained planning
+python3 run.py "Build OAuth" --repo ../svc --no-forecast     # skip the estimate entirely
+```
+
+Non-interactively (no TTY) and with no flag, loopd proceeds at the current budget in
+constrained mode — it never silently raises your budget and never blocks automation.
+
+**It learns.** Every finished run for which a forecast was produced appends a
+predicted-vs-actual record to `.agentic/forecasts.jsonl` (which survives `--fresh`, like
+project memory). The estimator
+folds a calibration factor from that history back into future estimates, so its numbers get
+truer for *your* project over time. After a run you see how it did:
+
+```
+  ┌─────────────────────────────────────────────┐
+  │           EXECUTION FORECAST · ACTUAL        │
+  └─────────────────────────────────────────────┘
+
+                      Predicted     Actual
+  Cost                $28.86        $25.97
+  Runtime             71 min        78 min
+  Steps               11            10
+
+  Prediction Accuracy   90.5%   ████████████████████░░
+```
+
+The estimator is a swappable abstraction (`forecast.Estimator`): v1 is a configurable
+weighted model; a future regression fit on `forecasts.jsonl` can drop in behind the same
+interface without touching the execution pipeline. Tune it with `FORECAST_*` env vars
+([configuration](configuration.md#execution-forecast)) or disable it with `--no-forecast` /
+`FORECAST_ENABLED=0`.
+
+## 4. Run it safely
 
 The developer agent runs with permissions bypassed so it can work unattended. For anything
 you care about, run inside the container so its file access is confined to it:
@@ -78,7 +162,7 @@ docker run --rm --env-file .env -v "$(pwd)/../my-app:/work" loopd --budget 25
 Running `python3 run.py` directly is fine for a throwaway directory you don't mind the agent
 editing. See [security.md](security.md) for the full sandbox model.
 
-## 4. The web dashboard (browser UI)
+## 5. The web dashboard (browser UI)
 
 Prefer a browser to the terminal? loopd ships a local dashboard that both **launches** runs
 (a task box that takes long tasks — your `@file` as a textarea) and **watches** them live.
@@ -92,6 +176,11 @@ From the page you can:
 - **Start / resume / stop** — launch a new run (a task box that takes long tasks, your
   `@file`), resume an interrupted one, or stop the active run (state is saved, so it stays
   resumable) — all from the top bar.
+- **Estimate first** — in the New Run modal, click *Estimate first* to see the Execution
+  Forecast card (cost, runtime, steps, risk) before launching; a *Use $X* button applies the
+  recommended budget. Tick *Constrained mode* to have the planner prioritize critical work.
+  While a run is live and after it ends, the right column shows the forecast and, on
+  completion, the predicted-vs-actual comparison with a prediction-accuracy score.
 - **Watch it think** — a live status hero (elapsed, cost, retries, model, progress), an
   execution graph highlighting the active phase (planner → developer → verification →
   decision), the plan as step cards, a runtime timeline, the raw console, and the final
@@ -105,7 +194,7 @@ It reads the same `.agentic/` files the CLI writes and refreshes about every 1.5
 network. Flags: `--repo`, `--budget`, `--host`, `--port` (see
 [configuration.md](configuration.md#dashboard)).
 
-## 5. Write a good brief (the highest-leverage thing you do)
+## 6. Write a good brief (the highest-leverage thing you do)
 
 loopd is only as good as what you ask for. Whether you write the brief by hand, via
 `/handoff`, or in a `@spec.md`, cover:
@@ -122,7 +211,7 @@ loopd is only as good as what you ask for. Whether you write the brief by hand, 
 The `/handoff` command produces exactly this shape. The clearer the "definition of done",
 the better the planner's `verify` commands — and those gates are what decide success.
 
-## 6. Engineering memory
+## 7. Engineering memory
 
 loopd keeps a small, structured record of what it has learned about your project at
 `<repo>/.agentic/memory.md` — architecture decisions, past failures, and known TODOs:
@@ -146,7 +235,7 @@ durable knowledge on success, and a stopped run is recorded as a failure. It sur
 `--fresh` (unlike a run's state) and is a plain file you can hand-edit or seed yourself.
 Disable auto-updates with `UPDATE_MEMORY=0`.
 
-## 7. While it runs
+## 8. While it runs
 
 loopd prints live progress (`→ Step …`, `dev attempt …`, `gates: PASS`, `✓ accepted …`).
 Everything is also written under `<repo>/.agentic/`:
@@ -161,7 +250,7 @@ Everything is also written under `<repo>/.agentic/`:
 
 You can **Ctrl-C** at any time — state is saved and the run is resumable.
 
-## 8. After a run
+## 9. After a run
 
 Start with the report:
 
@@ -194,7 +283,7 @@ git checkout master && git merge agentic/run-<timestamp>
 | `2` | setup / plan problem | fix the input (e.g. dirty tree, unusable brief) and re-run |
 | `3` | budget exceeded | raise `--budget` and `--resume-run` — progress is kept |
 
-## 9. Resume, retry, redo
+## 10. Resume, retry, redo
 
 ```bash
 python3 run.py --resume-run --repo ../my-app --budget 40   # continue where it stopped
@@ -202,8 +291,11 @@ python3 run.py --fresh      --repo ../my-app               # archive old state, 
 ```
 
 Budget stops and interrupts are always resumable — you never lose accepted steps.
+A resume keeps the run's original budget unless you pass `--budget` again, so after a
+budget stop (exit `3`) you must raise `--budget` to make headroom — resuming without it
+just stops at the same cap.
 
-## 10. Control cost
+## 11. Control cost
 
 - Set a ceiling with `--budget` (or `BUDGET_USD` in `.env`); it's enforced after every model
   call, and a stop is resumable, so start conservative and raise deliberately.
@@ -212,7 +304,7 @@ Budget stops and interrupts are always resumable — you never lose accepted ste
 - The loop's overhead only pays off on multi-step work — for a trivial one-file change, a
   plain `claude -p` is cheaper.
 
-## 11. Verify real-world projects
+## 12. Verify real-world projects
 
 The planner composes deterministic checks into each step's `verify` commands, including
 built-in probes for things unit tests can't cover:
@@ -227,7 +319,7 @@ python3 -m orchestrator.probe proc-up --start "npm run preview -- --port 4173" \
 
 Full probe list and options: [configuration.md](configuration.md#verification-probes).
 
-## 12. Troubleshooting
+## 13. Troubleshooting
 
 - **Everything fails instantly at $0 cost** → auth. Check `.env` has a working key/token and
   that a placeholder `sk-ant-...` isn't overriding your OAuth token.

@@ -40,6 +40,9 @@ your interactive Claude Code session
 .agentic/brief.md
         │
         ▼
+Execution Forecast  →  cost/runtime/steps estimate  →  raise budget · run constrained · abort
+        │
+        ▼
 ┌─ Planner · persistent session · resumed every turn ────────────────────────┐
 │  plan → author dev prompt → review handover → directive:                   │
 │  accept | reject+feedback | replan | descope | task_complete | abort       │
@@ -80,6 +83,10 @@ your interactive Claude Code session
 ## Key features
 
 - Plan → implement → **verify** → commit loop that runs unattended to completion.
+- **Execution Forecast** — before it builds, one cheap model call sizes the work and a
+  deterministic, self-calibrating estimator predicts cost, runtime, steps, and risk, then asks
+  whether to raise the budget or run constrained. It grades itself against actuals after every
+  run and gets truer over time.
 - A planner that stays in the loop: it reviews each result and re-plans on failure.
 - **Engineering memory** — a structured `.agentic/memory.md` (architecture decisions, past
   failures, TODOs) the planner reads every run and updates automatically.
@@ -137,7 +144,7 @@ docker run --rm --env-file .env -v "$(pwd)/../my-app:/work" loopd --budget 25
 ```
 
 Prefer a browser? `python3 dashboard.py --repo ../my-app` opens a local dashboard to launch
-and watch runs live (see [docs/usage.md](docs/usage.md#4-the-web-dashboard-browser-ui)).
+and watch runs live (see [docs/usage.md](docs/usage.md#5-the-web-dashboard-browser-ui)).
 
 ## How a run works
 

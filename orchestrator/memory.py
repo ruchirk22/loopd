@@ -45,14 +45,15 @@ def load(repo) -> Dict[str, List[str]]:
             data.setdefault(cur, [])
         elif cur and s[:2] in ("- ", "* "):
             item = s[2:].strip()
-            if item and not (item.startswith("_") and item.endswith("_")):
+            if item:  # the "_(none yet)_" placeholder is not a bullet, so it's already excluded
                 data[cur].append(item)
     return data
 
 
 def render(data: Dict[str, List[str]]) -> str:
     lines = ["# loopd project memory", "",
-             "_What loopd has learned about this project. Hand-editable; loopd appends to it._", ""]
+             "_Bullet facts loopd has learned about this project. Hand-editable — keep entries "
+             "as `-` bullets under each `##` section; loopd appends to them._", ""]
     order = [s for s in SECTIONS if s in data] + [s for s in data if s not in SECTIONS]
     if not order:
         order = SECTIONS
@@ -90,13 +91,24 @@ def merge(repo, updates: Dict[str, List[str]]) -> Path:
     return p
 
 
-def as_prompt(repo, cap: int = 4000) -> str:
-    """The memory text injected into the planner's seed (empty string if none)."""
+def as_prompt(repo, cap: int = 12000) -> str:
+    """The memory text injected into the planner's seed (empty string if none). If it
+    exceeds `cap`, drop the OLDEST items structurally (never cut a section mid-line) so the
+    newest, most relevant knowledge is what survives."""
     p = _path(repo)
     if not p.is_file():
         return ""
-    txt = p.read_text(errors="replace").strip()
-    return txt[:cap]
+    data = load(repo)
+    txt = render(data)
+    if len(txt) <= cap:
+        return txt.strip()
+    while len(render(data)) > cap and any(data.values()):
+        biggest = max(data, key=lambda s: len(data.get(s) or []))
+        if data[biggest]:
+            data[biggest].pop(0)  # drop the oldest bullet in the largest section
+        else:
+            data.pop(biggest)
+    return (render(data).rstrip() + "\n\n_(memory truncated — oldest entries dropped)_")
 
 
 def from_directive_memory(m: dict) -> Dict[str, List[str]]:
