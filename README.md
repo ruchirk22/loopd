@@ -1,5 +1,3 @@
-<p align="center"><img src="assets/loopd.svg" width="300" alt="loopd"></p>
-
 # loopd
 
 [![CI](https://github.com/ruchirk22/loopd/actions/workflows/ci.yml/badge.svg)](https://github.com/ruchirk22/loopd/actions/workflows/ci.yml)
@@ -10,6 +8,8 @@ directs disposable developer sessions, and every step is verified by determinist
 *outside* the model before it is committed.
 
 Built on [Claude Code](https://docs.claude.com/en/docs/claude-code)'s headless mode.
+
+<p align="center"><img src="assets/loopd_no_bg.png" width="360" alt="loopd"></p>
 
 ## Why loopd?
 
