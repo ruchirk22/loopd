@@ -257,96 +257,166 @@ PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>loopd dashboard</title>
 <style>
-  :root { color-scheme: dark; --bg:#0d1117; --panel:#161b22; --line:#30363d; --fg:#e6edf3;
-          --mut:#8b949e; --acc:#2f81f7; --ok:#3fb950; --warn:#d29922; --bad:#f85149; }
+  :root { color-scheme:dark;
+    --bg:#0a0d13; --surface:#11161f; --surface2:#161c27; --raise:#1b2330;
+    --line:#222b39; --line-hi:#313d4e; --field:#0b0f16;
+    --fg:#e9eef6; --mut:#8a95a5; --mut2:#aab4c2;
+    --acc:#5b8cff; --acc2:#82a6ff; --grad:linear-gradient(135deg,#5b8cff,#7c5cff);
+    --ok:#38d39f; --warn:#f5b544; --bad:#ff6b6b; --r:14px; --r2:10px;
+    --shadow:0 10px 30px rgba(0,0,0,.35); }
   * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
-  header { padding:14px 20px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:12px; }
-  header h1 { font-size:16px; margin:0; font-weight:600; letter-spacing:.3px; }
+  body { margin:0; color:var(--fg); -webkit-font-smoothing:antialiased;
+    font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    background:
+      radial-gradient(900px 460px at 80% -160px, rgba(124,92,255,.10), transparent 60%),
+      radial-gradient(1000px 500px at 10% -180px, rgba(91,140,255,.10), transparent 60%),
+      var(--bg); }
+  code, .mono { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  header { position:sticky; top:0; z-index:5; display:flex; align-items:center; gap:12px;
+    padding:13px 22px; border-bottom:1px solid var(--line);
+    background:rgba(10,13,19,.72); backdrop-filter:blur(10px); }
+  .logo { width:28px; height:28px; border-radius:9px; background:var(--grad);
+    display:grid; place-items:center; box-shadow:var(--shadow); }
+  .logo svg { width:17px; height:17px; }
+  header h1 { font-size:16px; margin:0; font-weight:700; letter-spacing:.2px; }
   header .sub { color:var(--mut); font-size:12px; }
-  main { display:grid; grid-template-columns:360px 1fr; gap:16px; padding:16px; align-items:start; }
-  @media (max-width:820px){ main{ grid-template-columns:1fr; } }
-  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; }
-  .panel h2 { font-size:12px; text-transform:uppercase; letter-spacing:.6px; color:var(--mut); margin:0 0 12px; }
-  label { display:block; font-size:12px; color:var(--mut); margin:10px 0 4px; }
-  input, textarea, select { width:100%; background:#0d1117; color:var(--fg); border:1px solid var(--line);
-          border-radius:6px; padding:8px; font:inherit; }
-  textarea { min-height:150px; resize:vertical; font:12px/1.5 ui-monospace,Menlo,Consolas,monospace; }
-  .row { display:flex; gap:8px; }
-  .row > * { flex:1; }
-  button { background:var(--acc); color:#fff; border:0; border-radius:6px; padding:9px 12px; font:inherit;
-          font-weight:600; cursor:pointer; margin-top:12px; }
-  button.secondary { background:#21262d; border:1px solid var(--line); }
-  button:disabled { opacity:.5; cursor:not-allowed; }
-  .metrics { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin-bottom:14px; }
-  .metric { background:#0d1117; border:1px solid var(--line); border-radius:8px; padding:10px; }
-  .metric .k { color:var(--mut); font-size:11px; text-transform:uppercase; letter-spacing:.4px; }
-  .metric .v { font-size:18px; font-weight:600; margin-top:2px; }
-  .bar { height:6px; background:#0d1117; border:1px solid var(--line); border-radius:4px; overflow:hidden; margin-top:6px; }
-  .bar > span { display:block; height:100%; background:var(--acc); }
+  header .spacer { flex:1; }
+  .chip { display:inline-flex; align-items:center; gap:8px; font-size:12px; color:var(--mut2);
+    border:1px solid var(--line); border-radius:999px; padding:6px 12px; background:var(--surface); }
+  .chip .live { width:7px; height:7px; border-radius:50%; background:var(--ok);
+    box-shadow:0 0 0 3px rgba(56,211,159,.15); }
+  main { max-width:1500px; margin:0 auto; display:grid; grid-template-columns:380px 1fr;
+    gap:18px; padding:20px 22px; align-items:start; }
+  @media (max-width:900px){ main { grid-template-columns:1fr; } }
+  .panel { background:linear-gradient(180deg,var(--surface),var(--surface2));
+    border:1px solid var(--line); border-radius:var(--r); padding:18px; transition:border-color .15s; }
+  .panel:hover { border-color:var(--line-hi); }
+  .panel h2 { font-size:11px; text-transform:uppercase; letter-spacing:.9px; color:var(--mut);
+    margin:0 0 14px; font-weight:600; }
+  .stack { display:flex; flex-direction:column; gap:18px; }
+  label { display:block; font-size:12px; color:var(--mut); margin:14px 0 6px; font-weight:500; }
+  label:first-of-type { margin-top:0; }
+  input, textarea { width:100%; background:var(--field); color:var(--fg); border:1px solid var(--line);
+    border-radius:var(--r2); padding:10px 11px; font:inherit; transition:border-color .15s,box-shadow .15s; }
+  input::placeholder, textarea::placeholder { color:#5c6675; }
+  input:focus, textarea:focus { outline:none; border-color:var(--acc); box-shadow:0 0 0 3px rgba(91,140,255,.18); }
+  textarea { min-height:190px; resize:vertical; font-family:ui-monospace,Menlo,Consolas,monospace;
+    font-size:12.5px; line-height:1.5; }
+  .row { display:flex; gap:10px; } .row > * { flex:1; }
+  .actions { display:flex; gap:10px; margin-top:16px; }
+  button { flex:1; border:0; border-radius:var(--r2); padding:11px 14px; font:inherit; font-weight:600;
+    cursor:pointer; transition:transform .05s, filter .15s, border-color .15s; }
+  button:active { transform:translateY(1px); }
+  .btn-primary { background:var(--grad); color:#fff; box-shadow:var(--shadow); }
+  .btn-primary:hover { filter:brightness(1.08); }
+  .btn-ghost { background:var(--raise); color:var(--fg); border:1px solid var(--line); }
+  .btn-ghost:hover { border-color:var(--line-hi); }
+  .hint { color:var(--mut); font-weight:400; }
+  .status-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:16px; }
+  .status { display:inline-flex; align-items:center; gap:9px; font-weight:600; padding:6px 13px;
+    border-radius:999px; border:1px solid var(--line); background:var(--surface); }
+  .status:has(.dot.run) { border-color:rgba(91,140,255,.4); color:var(--acc2); }
+  .status:has(.dot.ok) { border-color:rgba(56,211,159,.4); color:var(--ok); }
+  .status:has(.dot.bad) { border-color:rgba(255,107,107,.4); color:var(--bad); }
+  .status .muted { color:var(--mut); font-weight:400; }
+  .dot { width:9px; height:9px; border-radius:50%; background:var(--mut); flex:none; }
+  .dot.run { background:var(--acc); animation:pulse 1.3s infinite; }
+  .dot.ok { background:var(--ok); } .dot.bad { background:var(--bad); }
+  @keyframes pulse { 0%,100%{ opacity:1; box-shadow:0 0 0 0 rgba(91,140,255,.4); }
+    50%{ opacity:.55; box-shadow:0 0 0 5px rgba(91,140,255,0); } }
+  .branch { font-size:11.5px; color:var(--mut2); background:var(--field); border:1px solid var(--line);
+    border-radius:7px; padding:4px 9px; max-width:46%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .metrics { display:grid; grid-template-columns:1.4fr 1fr 1fr; gap:12px; }
+  @media (max-width:560px){ .metrics { grid-template-columns:1fr; } }
+  .metric { background:var(--field); border:1px solid var(--line); border-radius:var(--r2); padding:13px 14px; }
+  .metric .k { color:var(--mut); font-size:10.5px; text-transform:uppercase; letter-spacing:.6px; font-weight:600; }
+  .metric .v { font-size:22px; font-weight:700; margin-top:3px; letter-spacing:-.3px; }
+  .gauge { height:7px; background:var(--bg); border:1px solid var(--line); border-radius:999px;
+    overflow:hidden; margin-top:10px; }
+  .gauge > span { display:block; height:100%; width:0; background:var(--grad); border-radius:999px; transition:width .4s ease; }
+  .current { margin-top:14px; color:var(--acc2); font-size:13px; }
+  .current:empty { display:none; }
   table { width:100%; border-collapse:collapse; font-size:13px; }
-  th, td { text-align:left; padding:7px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
-  th { color:var(--mut); font-size:11px; text-transform:uppercase; letter-spacing:.4px; }
-  .badge { font-size:11px; padding:2px 7px; border-radius:20px; border:1px solid var(--line); white-space:nowrap; }
-  .b-done{ color:var(--ok); border-color:#238636; } .b-in_progress{ color:var(--acc); border-color:var(--acc); }
-  .b-pending{ color:var(--mut); } .b-skipped{ color:var(--warn); border-color:#9e6a03; }
-  .status { display:inline-flex; align-items:center; gap:7px; font-weight:600; }
-  .dot { width:9px; height:9px; border-radius:50%; background:var(--mut); }
-  .dot.run{ background:var(--acc); animation:pulse 1.2s infinite; } .dot.ok{ background:var(--ok); } .dot.bad{ background:var(--bad); }
-  @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:.35;} }
-  .timeline { max-height:220px; overflow:auto; font:12px/1.6 ui-monospace,Menlo,Consolas,monospace; }
-  .timeline div { color:var(--mut); } .timeline b { color:var(--fg); font-weight:600; }
-  pre.console, pre.report { background:#0d1117; border:1px solid var(--line); border-radius:8px; padding:12px;
-          max-height:320px; overflow:auto; font:12px/1.5 ui-monospace,Menlo,Consolas,monospace; white-space:pre-wrap; }
+  thead th { text-align:left; padding:0 10px 10px; color:var(--mut); font-size:10.5px;
+    text-transform:uppercase; letter-spacing:.6px; font-weight:600; border-bottom:1px solid var(--line); }
+  tbody td { padding:10px; border-bottom:1px solid var(--line); vertical-align:top; }
+  tbody tr:last-child td { border-bottom:0; }
+  tbody tr:hover td { background:rgba(255,255,255,.015); }
+  .badge { display:inline-flex; align-items:center; gap:6px; font-size:11px; font-weight:600;
+    padding:3px 9px; border-radius:999px; border:1px solid var(--line); white-space:nowrap; color:var(--mut2); }
+  .badge::before { content:""; width:6px; height:6px; border-radius:50%; background:currentColor; }
+  .b-done { color:var(--ok); border-color:rgba(56,211,159,.35); }
+  .b-in_progress { color:var(--acc2); border-color:rgba(91,140,255,.35); }
+  .b-pending { color:var(--mut); }
+  .b-skipped { color:var(--warn); border-color:rgba(245,181,68,.35); }
+  .timeline { max-height:260px; overflow:auto; font-family:ui-monospace,Menlo,Consolas,monospace;
+    font-size:12px; line-height:1.75; }
+  .timeline div { color:var(--mut2); } .timeline .muted { color:var(--mut); } .timeline b { color:var(--fg); font-weight:600; }
+  pre.console, pre.report { background:var(--bg); border:1px solid var(--line); border-radius:var(--r2);
+    padding:14px; max-height:340px; overflow:auto; color:var(--mut2);
+    font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px; line-height:1.55; white-space:pre-wrap; }
+  .empty { color:var(--mut); text-align:center; padding:26px 10px; font-size:13px; }
+  .empty .big { font-size:24px; opacity:.45; margin-bottom:8px; }
   .muted { color:var(--mut); } .err { color:var(--bad); } .mt { margin-top:16px; }
-  .stack { display:flex; flex-direction:column; gap:16px; }
+  #launchmsg { margin-top:14px; font-size:13px; min-height:18px; }
 </style></head>
 <body>
-<header><h1>loopd</h1><span class="sub">local run dashboard</span></header>
+<header>
+  <div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2"
+    stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg></div>
+  <h1>loopd</h1><span class="sub">run dashboard</span>
+  <span class="spacer"></span>
+  <span class="chip"><span class="live"></span>local · auto-refreshing</span>
+</header>
 <main>
   <section class="panel">
     <h2>Start a run</h2>
-    <label>Target repo (path)</label>
+    <label>Target repo</label>
     <input id="repo" placeholder="../my-app">
-    <label>Task / brief <span class="muted">(long tasks welcome — this is your @file)</span></label>
-    <textarea id="task" placeholder="Describe what to build: objective, constraints, definition of done…"></textarea>
+    <label>Task / brief <span class="hint">— long tasks welcome (your @file)</span></label>
+    <textarea id="task" placeholder="What to build: objective, constraints, definition of done…"></textarea>
     <div class="row">
       <div><label>Budget ($)</label><input id="budget" type="number" step="1" min="1"></div>
-      <div><label>PM model</label><input id="pm" placeholder="(default)"></div>
-      <div><label>Dev model</label><input id="dev" placeholder="(default)"></div>
+      <div><label>PM model</label><input id="pm" placeholder="default"></div>
+      <div><label>Dev model</label><input id="dev" placeholder="default"></div>
     </div>
-    <button id="start">Start new run</button>
-    <button id="resume" class="secondary">Resume interrupted run</button>
-    <div id="launchmsg" class="mt"></div>
+    <div class="actions">
+      <button id="start" class="btn-primary">Start new run</button>
+      <button id="resume" class="btn-ghost">Resume</button>
+    </div>
+    <div id="launchmsg"></div>
   </section>
 
   <section class="stack">
     <div class="panel">
       <h2>Run status</h2>
-      <div id="statusline" class="status"><span class="dot"></span><span>Loading…</span></div>
-      <div class="metrics mt">
-        <div class="metric"><div class="k">Cost</div><div class="v" id="m-cost">–</div><div class="bar"><span id="m-costbar"></span></div></div>
+      <div class="status-head">
+        <div id="statusline" class="status"><span class="dot"></span><span>Loading…</span></div>
+        <code class="branch" id="m-branch">–</code>
+      </div>
+      <div class="metrics">
+        <div class="metric"><div class="k">Cost</div><div class="v" id="m-cost">–</div>
+          <div class="gauge"><span id="m-costbar"></span></div></div>
         <div class="metric"><div class="k">Steps</div><div class="v" id="m-steps">–</div></div>
         <div class="metric"><div class="k">Replans</div><div class="v" id="m-replans">–</div></div>
-        <div class="metric"><div class="k">Branch</div><div class="v" id="m-branch" style="font-size:12px;">–</div></div>
       </div>
-      <div id="current" class="muted"></div>
+      <div id="current" class="current"></div>
     </div>
 
     <div class="panel">
       <h2>Plan</h2>
       <table><thead><tr><th>Step</th><th>Status</th><th>Att</th><th>Rej</th><th>Cost</th><th>Commit</th></tr></thead>
-        <tbody id="steps"><tr><td colspan="6" class="muted">No run yet.</td></tr></tbody></table>
+        <tbody id="steps"><tr><td colspan="6"><div class="empty"><div class="big">◍</div>No run yet — start one on the left.</div></td></tr></tbody></table>
     </div>
 
     <div class="panel">
       <h2>Timeline</h2>
-      <div id="timeline" class="timeline muted">—</div>
+      <div id="timeline" class="timeline"><div class="empty">No events yet.</div></div>
     </div>
 
     <div class="panel">
       <h2>Console</h2>
-      <pre class="console" id="console">—</pre>
+      <pre class="console" id="console">Waiting for output…</pre>
     </div>
 
     <div class="panel" id="reportpanel" style="display:none;">
