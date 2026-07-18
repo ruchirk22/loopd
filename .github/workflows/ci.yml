@@ -22,5 +22,3 @@ jobs:
           git config --global user.name ci
       - name: Unit + end-to-end tests (stdlib only, no network, no API)
         run: python -m unittest discover -s tests -v
-      - name: Validate benchmark checks are fair judges
-        run: python benchmarks/selftest.py

@@ -168,19 +168,6 @@ Common knobs (all optional, via `.env` or environment):
 The full list of variables, CLI flags, and seeding options is in
 [docs/configuration.md](docs/configuration.md).
 
-## Benchmarks
-
-loopd is built to be measured, not asserted. `benchmarks/` runs each task twice on the same
-model — once as a raw one-shot `claude -p` agent, once through loopd — and scores both with
-an independent check the agent never sees, then reports success rate, cost, and time.
-
-```bash
-python3 benchmarks/run_benchmark.py --model claude-opus-4-8 --repeat 3 --budget 8
-```
-
-Methodology, how to add tasks, and the standing results table live in
-[benchmarks/README.md](benchmarks/README.md) and [benchmarks/RESULTS.md](benchmarks/RESULTS.md).
-
 ## Documentation
 
 - [docs/architecture.md](docs/architecture.md) — how the loop, directives, and verification
@@ -188,4 +175,3 @@ Methodology, how to add tasks, and the standing results table live in
 - [docs/configuration.md](docs/configuration.md) — every setting, flag, and seeding mode.
 - [docs/security.md](docs/security.md) — the sandbox model and what the guarantees do and
   don't cover.
-- [benchmarks/README.md](benchmarks/README.md) — measuring loopd against a raw one-shot agent.

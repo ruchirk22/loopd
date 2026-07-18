@@ -52,5 +52,4 @@ this is defense against sloppiness and drift — not a sandbox against a malicio
 
 The default models are capable and not free. The budget cap (`BUDGET_USD` / `--budget`) is
 checked after every call and stops are resumable — start conservative and raise
-deliberately. Use the [benchmarks](../benchmarks/README.md) to measure cost per task before
-scaling up.
+deliberately.

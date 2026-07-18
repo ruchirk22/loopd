@@ -5,9 +5,8 @@
 __pycache__/
 *.pyc
 
-# Orchestrator run state (lives inside target repos) and benchmark outputs
+# Orchestrator run state (lives inside target repos)
 .agentic/
-benchmarks/results/
 
 # macOS
 .DS_Store
