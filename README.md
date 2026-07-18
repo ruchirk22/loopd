@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo.svg" width="84" alt="loopd"></p>
+
 # loopd
 
 [![CI](https://github.com/ruchirk22/loopd/actions/workflows/ci.yml/badge.svg)](https://github.com/ruchirk22/loopd/actions/workflows/ci.yml)

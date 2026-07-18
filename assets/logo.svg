@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="loopd">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6E7CFF"/>
+      <stop offset="1" stop-color="#8B5CF6"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="62" height="62" rx="16" fill="#11131A" stroke="rgba(255,255,255,0.08)"/>
+  <!-- the loop: a ring with a gap, representing the plan → verify → decide cycle -->
+  <circle cx="32" cy="32" r="15" fill="none" stroke="url(#g)" stroke-width="5"
+          stroke-linecap="round" stroke-dasharray="78 28" transform="rotate(128 32 32)"/>
+  <!-- the deterministic step node on the loop -->
+  <circle cx="32" cy="17" r="4.6" fill="#F5F5F5"/>
+</svg>

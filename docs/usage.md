@@ -89,14 +89,20 @@ python3 dashboard.py --repo ../my-app        # opens on http://127.0.0.1:8787
 
 From the page you can:
 
-- **Start a run** — set the repo, paste the task/brief, budget, and (optionally) models,
-  then *Start new run* or *Resume interrupted run*.
-- **Watch live** — status, cost-vs-budget, steps done, replans, the current step, the plan
-  table, an event timeline, the raw console, and the final `report.md` when it lands.
+- **Start / resume / stop** — launch a new run (a task box that takes long tasks, your
+  `@file`), resume an interrupted one, or stop the active run (state is saved, so it stays
+  resumable) — all from the top bar.
+- **Watch it think** — a live status hero (elapsed, cost, retries, model, progress), an
+  execution graph highlighting the active phase (planner → developer → verification →
+  decision), the plan as step cards, a runtime timeline, the raw console, and the final
+  report when it lands.
+- **Inspect any step** — click a step card to open a drawer with its acceptance criteria,
+  verify commands, developer summary, and the full handover packet (real diff + gate
+  transcript).
 
-It reads the same `.agentic/` files the CLI writes and refreshes every couple of seconds.
-It is a **local tool** — it binds to `127.0.0.1` and spawns `run.py`, so don't expose it to
-a network. Flags: `--repo`, `--budget`, `--host`, `--port` (see
+It reads the same `.agentic/` files the CLI writes and refreshes about every 1.5s. It is a
+**local tool** — it binds to `127.0.0.1` and spawns `run.py`, so don't expose it to a
+network. Flags: `--repo`, `--budget`, `--host`, `--port` (see
 [configuration.md](configuration.md#dashboard)).
 
 ## 5. Write a good brief (the highest-leverage thing you do)

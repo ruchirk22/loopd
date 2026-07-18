@@ -1,18 +1,21 @@
-"""A tiny local web dashboard for loopd: launch runs (a task box, additive to `@file` for
-long tasks) and watch them live — plan, budget, current step, event timeline, console —
-by reading the `.agentic/` JSON the loop already writes.
+"""loopd mission-control dashboard: launch runs and watch the runtime plan, execute, verify
+and decide — live, from the `.agentic/` data the loop writes.
 
 Stdlib only (http.server). LOCAL TOOL: it spawns processes and reads paths you give it, so
 it binds to 127.0.0.1 by default. Do not expose it to a network.
 
     python3 dashboard.py --repo ../my-app          # default target repo, opens on :8787
     python3 dashboard.py --port 9000
+
+Everything shown is real, recorded data — no fabricated ETAs or token counters.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import mimetypes
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -23,6 +26,7 @@ from urllib.parse import parse_qs, urlparse
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RUN_PY = REPO_ROOT / "run.py"
+ASSETS = REPO_ROOT / "assets"
 
 sys.path.insert(0, str(REPO_ROOT))
 from orchestrator.env import load_dotenv  # noqa: E402
@@ -30,15 +34,15 @@ from orchestrator.env import load_dotenv  # noqa: E402
 
 # ---------------------------------------------------------------- data
 
-def _tail_events(path: Path, n: int) -> list:
+def _read_events(path: Path, cap: int = 2000) -> list:
     if not path.is_file():
         return []
     try:
-        lines = path.read_text(errors="replace").splitlines()
+        lines = path.read_text(errors="replace").splitlines()[-cap:]
     except OSError:
         return []
     out = []
-    for line in lines[-n:]:
+    for line in lines:
         line = line.strip()
         if not line:
             continue
@@ -49,12 +53,92 @@ def _tail_events(path: Path, n: int) -> list:
     return out
 
 
+def _active_node(events, running, finished):
+    """Infer which runtime phase is active from the most recent event — planner, developer,
+    verification, or decision. Honest inference, not a guess about the future."""
+    if finished:
+        return "done"
+    if not running:
+        return None
+    for e in reversed(events):
+        ev = e.get("event", "")
+        label = str(e.get("label", ""))
+        if ev == "gates":
+            return "verification"
+        if ev == "dev_error":
+            return "developer"
+        if ev == "step_committed":
+            return "decision"
+        if ev in ("replanned", "step_rejected", "step_descoped"):
+            return "decision"
+        if ev == "pm_turn":
+            if label.startswith("dispatch"):
+                return "developer"
+            if label.startswith("review") or label == "finalize" or label == "corrective":
+                return "decision"
+            if label == "plan" or e.get("verdict") == "plan":
+                return "planner"
+        if ev in ("run_started", "run_resumed", "pre_run_snapshot"):
+            return "planner"
+    return "planner"
+
+
+_KIND = {  # event -> (kind, human text builder)
+    "run_started": ("info", lambda e: "Run started"),
+    "run_resumed": ("info", lambda e: "Run resumed"),
+    "pre_run_snapshot": ("info", lambda e: "Snapshotted pre-run changes"),
+    "pm_checkpoint": ("info", lambda e: "PM checkpoint"),
+    "gates": ("gate", lambda e: "Gates passed" if e.get("passed") else "Gates failed"),
+    "dev_error": ("warn", lambda e: f"Developer error · step {e.get('step','?')}"),
+    "step_committed": ("ok", lambda e: f"Step {e.get('step','?')} accepted · {str(e.get('sha',''))[:9]}"),
+    "step_rejected": ("warn", lambda e: f"Review rejected step {e.get('step','?')}"),
+    "step_descoped": ("warn", lambda e: f"Step {e.get('step','?')} descoped"),
+    "step_adopted_head": ("ok", lambda e: f"Step {e.get('step','?')} adopted commit"),
+    "replanned": ("replan", lambda e: "Plan revised"),
+    "escalation": ("bad", lambda e: f"Stopped: {e.get('reason','')}"),
+    "budget_exceeded": ("bad", lambda e: "Budget exceeded"),
+    "run_finished": ("ok", lambda e: "Run complete"),
+}
+
+
+def _timeline(events, n=48):
+    out = []
+    for e in events:
+        ev = e.get("event", "")
+        if ev == "pm_turn":
+            label = str(e.get("label", ""))
+            verdict = e.get("verdict", "")
+            if label.startswith("dispatch"):
+                out.append((e.get("ts"), "arrow", f"Dispatched step {label.split(':',1)[-1]}"))
+            elif label == "plan" or verdict == "plan":
+                out.append((e.get("ts"), "info", "Plan created"))
+            elif label.startswith("review"):
+                vk = {"accept": ("ok", "accepted"), "reject": ("warn", "rejected"),
+                      "replan": ("replan", "replan"), "descope": ("warn", "descoped"),
+                      "abort": ("bad", "aborted")}.get(verdict, ("dot", verdict or "reviewed"))
+                out.append((e.get("ts"), vk[0], f"Review: {vk[1]} · step {label.split(':',1)[-1]}"))
+            elif label == "finalize":
+                out.append((e.get("ts"), "info", f"Finalize: {verdict}"))
+            continue
+        spec = _KIND.get(ev)
+        if spec:
+            out.append((e.get("ts"), spec[0], spec[1](e)))
+    out = out[-n:]
+    return [{"ts": ts, "kind": k, "text": t} for ts, k, t in out]
+
+
+def _gate_stats(events):
+    g = [e for e in events if e.get("event") == "gates"]
+    passed = sum(1 for e in g if e.get("passed"))
+    return passed, len(g)
+
+
 def snapshot(repo, running: bool = False) -> dict:
-    """Everything the UI needs about a repo's current/last run — read from `.agentic/`."""
     repo = Path(repo).expanduser().resolve()
     ad = repo / ".agentic"
     state_path = ad / "state.json"
-    out = {"repo": str(repo), "exists": state_path.exists(), "running": running, "events": []}
+    out = {"repo": str(repo), "exists": state_path.exists(), "running": running,
+           "events": [], "timeline": []}
     if not state_path.exists():
         return out
     try:
@@ -67,33 +151,81 @@ def snapshot(repo, running: bool = False) -> dict:
     done = sum(1 for s in steps if s.get("status") == "done")
     skipped = sum(1 for s in steps if s.get("status") == "skipped")
     current = next((s for s in steps if s.get("status") in ("in_progress", "pending")), None)
-    brief = ""
-    if (ad / "brief.md").is_file():
-        try:
-            brief = (ad / "brief.md").read_text(errors="replace")[:4000]
-        except OSError:
-            brief = ""
+    cur_idx = (steps.index(current) + 1) if current in steps and current else (done + skipped)
+    events = _read_events(ad / "log.jsonl")
+    finished = st.get("finished", False)
+    started = st.get("started")
+    gate_pass, gate_total = _gate_stats(events)
+
     out.update({
         "task": st.get("task", ""),
-        "brief": brief,
         "branch": st.get("branch", ""),
-        "finished": st.get("finished", False),
+        "finished": finished,
         "total_cost_usd": st.get("total_cost_usd", 0.0),
         "budget_usd": st.get("budget_usd"),
+        "pm_model": st.get("pm_model", ""),
+        "dev_model": st.get("dev_model", ""),
         "replans_used": st.get("replans_used", 0),
         "plan_summary": plan.get("summary", ""),
+        "elapsed_s": (time.time() - started) if started else None,
+        "active_node": _active_node(events, running, finished),
+        "step_index": cur_idx,
         "steps": [{
             "id": s.get("id"), "goal": s.get("goal"), "status": s.get("status"),
             "attempts": s.get("attempts", 0), "rejections": s.get("rejections", 0),
             "cost_usd": s.get("cost_usd", 0.0), "commit": (s.get("commit_sha") or "")[:9],
             "skip_reason": s.get("skip_reason", ""),
+            "verify_count": len(s.get("verify", []) or []),
         } for s in steps],
         "counts": {"done": done, "skipped": skipped, "total": len(steps)},
         "current_step": ({"id": current.get("id"), "goal": current.get("goal")}
                          if current else None),
-        "events": _tail_events(ad / "log.jsonl", 60),
+        "metrics": {
+            "accepted": done, "rejected": sum(s.get("rejections", 0) for s in steps),
+            "replans": st.get("replans_used", 0),
+            "attempts": sum(s.get("attempts", 0) for s in steps),
+            "gate_pass": gate_pass, "gate_total": gate_total,
+        },
+        "timeline": _timeline(events),
         "has_report": (ad / "report.md").is_file(),
         "has_escalation": (ad / "escalation.json").is_file(),
+    })
+    return out
+
+
+def step_detail(repo, step_id) -> dict:
+    repo = Path(repo).expanduser().resolve()
+    ad = repo / ".agentic"
+    out = {"found": False, "id": step_id}
+    try:
+        st = json.loads((ad / "state.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return out
+    steps = (st.get("plan") or {}).get("steps", [])
+    step = next((s for s in steps if str(s.get("id")) == str(step_id)), None)
+    if not step:
+        return out
+    handovers = sorted((ad / "handovers").glob(f"step-{step_id}-attempt-*.md")) \
+        if (ad / "handovers").is_dir() else []
+    latest = ""
+    if handovers:
+        try:
+            latest = handovers[-1].read_text(errors="replace")
+        except OSError:
+            latest = ""
+    out.update({
+        "found": True,
+        "step": {
+            "id": step.get("id"), "goal": step.get("goal"), "status": step.get("status"),
+            "details": step.get("details", ""),
+            "acceptance_criteria": step.get("acceptance_criteria", []),
+            "verify": step.get("verify", []),
+            "attempts": step.get("attempts", 0), "rejections": step.get("rejections", 0),
+            "cost_usd": step.get("cost_usd", 0.0), "commit_sha": step.get("commit_sha", ""),
+            "skip_reason": step.get("skip_reason", ""), "dev_summary": step.get("dev_summary", ""),
+        },
+        "handover": latest,
+        "handover_count": len(handovers),
     })
     return out
 
@@ -141,15 +273,28 @@ class RunManager:
             env["DEV_MODEL"] = dev_model
         try:
             logf = open(ad / "dashboard-run.log", "w")
-            proc = subprocess.Popen(cmd, cwd=str(REPO_ROOT), env=env,
-                                    stdout=logf, stderr=subprocess.STDOUT, text=True)
+            proc = subprocess.Popen(cmd, cwd=str(REPO_ROOT), env=env, stdout=logf,
+                                    stderr=subprocess.STDOUT, text=True, start_new_session=True)
         except OSError as e:
             return {"ok": False, "error": f"could not launch: {e}"}
         with self._lock:
             self._procs[str(repo)] = proc
         return {"ok": True, "pid": proc.pid, "mode": mode}
 
-    def console(self, repo, n: int = 300) -> str:
+    def stop(self, repo) -> dict:
+        key = str(Path(repo).expanduser().resolve())
+        with self._lock:
+            p = self._procs.get(key)
+        if not p or p.poll() is not None:
+            return {"ok": False, "error": "no active run for this repo"}
+        try:
+            # SIGINT so run.py exits like Ctrl-C — state is saved and the run is resumable.
+            os.killpg(p.pid, signal.SIGINT)
+        except (ProcessLookupError, PermissionError, OSError) as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": True}
+
+    def console(self, repo, n: int = 400) -> str:
         path = Path(repo).expanduser().resolve() / ".agentic" / "dashboard-run.log"
         if not path.is_file():
             return ""
@@ -163,7 +308,7 @@ class RunManager:
 
 def _make_handler(manager: RunManager, default_repo: str, default_budget: float):
     class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *a):  # quiet
+        def log_message(self, *a):
             pass
 
         def _send(self, code, body, ctype="application/json"):
@@ -177,32 +322,44 @@ def _make_handler(manager: RunManager, default_repo: str, default_budget: float)
         def _json(self, obj, code=200):
             self._send(code, json.dumps(obj))
 
+        def _serve_asset(self, name):
+            # only files directly inside assets/, no traversal
+            safe = Path(name).name
+            path = ASSETS / safe
+            if not path.is_file():
+                self._json({"error": "not found"}, 404)
+                return
+            ctype = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+            try:
+                self._send(200, path.read_bytes(), ctype)
+            except OSError:
+                self._json({"error": "unreadable"}, 500)
+
         def do_GET(self):
             u = urlparse(self.path)
             q = parse_qs(u.query)
             repo = (q.get("repo", [default_repo]) or [default_repo])[0]
             if u.path == "/":
                 self._send(200, PAGE, "text/html; charset=utf-8")
+            elif u.path.startswith("/assets/"):
+                self._serve_asset(u.path[len("/assets/"):])
             elif u.path == "/api/config":
                 self._json({"default_repo": default_repo or "", "default_budget": default_budget})
             elif u.path == "/api/state":
-                if not repo:
-                    self._json({"exists": False, "events": [], "repo": ""})
-                    return
-                self._json(snapshot(repo, running=manager.is_running(repo)))
+                self._json(snapshot(repo, running=manager.is_running(repo)) if repo
+                           else {"exists": False, "events": [], "timeline": [], "repo": ""})
             elif u.path == "/api/console":
                 self._json({"log": manager.console(repo)})
             elif u.path == "/api/report":
                 p = Path(repo).expanduser().resolve() / ".agentic" / "report.md"
                 self._json({"report": p.read_text(errors="replace") if p.is_file() else ""})
+            elif u.path == "/api/step":
+                self._json(step_detail(repo, (q.get("id", [""]) or [""])[0]))
             else:
                 self._json({"error": "not found"}, 404)
 
         def do_POST(self):
             u = urlparse(self.path)
-            if u.path != "/api/run":
-                self._json({"error": "not found"}, 404)
-                return
             try:
                 length = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(length) or b"{}")
@@ -213,14 +370,19 @@ def _make_handler(manager: RunManager, default_repo: str, default_budget: float)
             if not repo:
                 self._json({"ok": False, "error": "repo is required"}, 400)
                 return
-            result = manager.launch(
-                repo=repo, task=body.get("task", ""),
-                budget=body.get("budget", default_budget),
-                pm_model=(body.get("pm_model") or "").strip(),
-                dev_model=(body.get("dev_model") or "").strip(),
-                mode=body.get("mode", "new"),
-            )
-            self._json(result, 200 if result.get("ok") else 409)
+            if u.path == "/api/run":
+                result = manager.launch(
+                    repo=repo, task=body.get("task", ""),
+                    budget=body.get("budget", default_budget),
+                    pm_model=(body.get("pm_model") or "").strip(),
+                    dev_model=(body.get("dev_model") or "").strip(),
+                    mode=body.get("mode", "new"))
+                self._json(result, 200 if result.get("ok") else 409)
+            elif u.path == "/api/stop":
+                result = manager.stop(repo)
+                self._json(result, 200 if result.get("ok") else 409)
+            else:
+                self._json({"error": "not found"}, 404)
 
     return Handler
 
@@ -228,8 +390,7 @@ def _make_handler(manager: RunManager, default_repo: str, default_budget: float)
 def serve(host: str, port: int, default_repo: str, default_budget: float) -> None:
     manager = RunManager()
     httpd = ThreadingHTTPServer((host, port), _make_handler(manager, default_repo, default_budget))
-    url = f"http://{host}:{port}"
-    print(f"loopd dashboard on {url}  (local only — do not expose)")
+    print(f"loopd dashboard on http://{host}:{port}  (local only — do not expose)")
     if default_repo:
         print(f"default repo: {Path(default_repo).expanduser().resolve()}")
     print("Ctrl-C to stop.")
@@ -243,7 +404,7 @@ def serve(host: str, port: int, default_repo: str, default_budget: float) -> Non
 
 def main(argv=None) -> int:
     load_dotenv()
-    ap = argparse.ArgumentParser(description="loopd web dashboard (local).")
+    ap = argparse.ArgumentParser(description="loopd mission-control dashboard (local).")
     ap.add_argument("--repo", default="", help="default target repo for the launch form")
     ap.add_argument("--budget", type=float, default=float(os.environ.get("BUDGET_USD", "25")))
     ap.add_argument("--host", default="127.0.0.1", help="bind host (keep it local)")
@@ -253,261 +414,419 @@ def main(argv=None) -> int:
     return 0
 
 
-PAGE = """<!doctype html>
+PAGE = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>loopd dashboard</title>
+<title>loopd — mission control</title>
+<link rel="icon" href="/assets/logo.svg">
 <style>
-  :root { color-scheme:dark;
-    --bg:#0a0d13; --surface:#11161f; --surface2:#161c27; --raise:#1b2330;
-    --line:#222b39; --line-hi:#313d4e; --field:#0b0f16;
-    --fg:#e9eef6; --mut:#8a95a5; --mut2:#aab4c2;
-    --acc:#5b8cff; --acc2:#82a6ff; --grad:linear-gradient(135deg,#5b8cff,#7c5cff);
-    --ok:#38d39f; --warn:#f5b544; --bad:#ff6b6b; --r:14px; --r2:10px;
-    --shadow:0 10px 30px rgba(0,0,0,.35); }
-  * { box-sizing:border-box; }
-  body { margin:0; color:var(--fg); -webkit-font-smoothing:antialiased;
-    font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-    background:
-      radial-gradient(900px 460px at 80% -160px, rgba(124,92,255,.10), transparent 60%),
-      radial-gradient(1000px 500px at 10% -180px, rgba(91,140,255,.10), transparent 60%),
-      var(--bg); }
-  code, .mono { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
-  header { position:sticky; top:0; z-index:5; display:flex; align-items:center; gap:12px;
-    padding:13px 22px; border-bottom:1px solid var(--line);
-    background:rgba(10,13,19,.72); backdrop-filter:blur(10px); }
-  .logo { width:28px; height:28px; border-radius:9px; background:var(--grad);
-    display:grid; place-items:center; box-shadow:var(--shadow); }
-  .logo svg { width:17px; height:17px; }
-  header h1 { font-size:16px; margin:0; font-weight:700; letter-spacing:.2px; }
-  header .sub { color:var(--mut); font-size:12px; }
-  header .spacer { flex:1; }
-  .chip { display:inline-flex; align-items:center; gap:8px; font-size:12px; color:var(--mut2);
-    border:1px solid var(--line); border-radius:999px; padding:6px 12px; background:var(--surface); }
-  .chip .live { width:7px; height:7px; border-radius:50%; background:var(--ok);
-    box-shadow:0 0 0 3px rgba(56,211,159,.15); }
-  main { max-width:1500px; margin:0 auto; display:grid; grid-template-columns:380px 1fr;
-    gap:18px; padding:20px 22px; align-items:start; }
-  @media (max-width:900px){ main { grid-template-columns:1fr; } }
-  .panel { background:linear-gradient(180deg,var(--surface),var(--surface2));
-    border:1px solid var(--line); border-radius:var(--r); padding:18px; transition:border-color .15s; }
-  .panel:hover { border-color:var(--line-hi); }
-  .panel h2 { font-size:11px; text-transform:uppercase; letter-spacing:.9px; color:var(--mut);
-    margin:0 0 14px; font-weight:600; }
-  .stack { display:flex; flex-direction:column; gap:18px; }
-  label { display:block; font-size:12px; color:var(--mut); margin:14px 0 6px; font-weight:500; }
-  label:first-of-type { margin-top:0; }
-  input, textarea { width:100%; background:var(--field); color:var(--fg); border:1px solid var(--line);
-    border-radius:var(--r2); padding:10px 11px; font:inherit; transition:border-color .15s,box-shadow .15s; }
-  input::placeholder, textarea::placeholder { color:#5c6675; }
-  input:focus, textarea:focus { outline:none; border-color:var(--acc); box-shadow:0 0 0 3px rgba(91,140,255,.18); }
-  textarea { min-height:190px; resize:vertical; font-family:ui-monospace,Menlo,Consolas,monospace;
-    font-size:12.5px; line-height:1.5; }
-  .row { display:flex; gap:10px; } .row > * { flex:1; }
-  .actions { display:flex; gap:10px; margin-top:16px; }
-  button { flex:1; border:0; border-radius:var(--r2); padding:11px 14px; font:inherit; font-weight:600;
-    cursor:pointer; transition:transform .05s, filter .15s, border-color .15s; }
-  button:active { transform:translateY(1px); }
-  .btn-primary { background:var(--grad); color:#fff; box-shadow:var(--shadow); }
-  .btn-primary:hover { filter:brightness(1.08); }
-  .btn-ghost { background:var(--raise); color:var(--fg); border:1px solid var(--line); }
-  .btn-ghost:hover { border-color:var(--line-hi); }
-  .hint { color:var(--mut); font-weight:400; }
-  .status-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:16px; }
-  .status { display:inline-flex; align-items:center; gap:9px; font-weight:600; padding:6px 13px;
-    border-radius:999px; border:1px solid var(--line); background:var(--surface); }
-  .status:has(.dot.run) { border-color:rgba(91,140,255,.4); color:var(--acc2); }
-  .status:has(.dot.ok) { border-color:rgba(56,211,159,.4); color:var(--ok); }
-  .status:has(.dot.bad) { border-color:rgba(255,107,107,.4); color:var(--bad); }
-  .status .muted { color:var(--mut); font-weight:400; }
-  .dot { width:9px; height:9px; border-radius:50%; background:var(--mut); flex:none; }
-  .dot.run { background:var(--acc); animation:pulse 1.3s infinite; }
-  .dot.ok { background:var(--ok); } .dot.bad { background:var(--bad); }
-  @keyframes pulse { 0%,100%{ opacity:1; box-shadow:0 0 0 0 rgba(91,140,255,.4); }
-    50%{ opacity:.55; box-shadow:0 0 0 5px rgba(91,140,255,0); } }
-  .branch { font-size:11.5px; color:var(--mut2); background:var(--field); border:1px solid var(--line);
-    border-radius:7px; padding:4px 9px; max-width:46%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .metrics { display:grid; grid-template-columns:1.4fr 1fr 1fr; gap:12px; }
-  @media (max-width:560px){ .metrics { grid-template-columns:1fr; } }
-  .metric { background:var(--field); border:1px solid var(--line); border-radius:var(--r2); padding:13px 14px; }
-  .metric .k { color:var(--mut); font-size:10.5px; text-transform:uppercase; letter-spacing:.6px; font-weight:600; }
-  .metric .v { font-size:22px; font-weight:700; margin-top:3px; letter-spacing:-.3px; }
-  .gauge { height:7px; background:var(--bg); border:1px solid var(--line); border-radius:999px;
-    overflow:hidden; margin-top:10px; }
-  .gauge > span { display:block; height:100%; width:0; background:var(--grad); border-radius:999px; transition:width .4s ease; }
-  .current { margin-top:14px; color:var(--acc2); font-size:13px; }
-  .current:empty { display:none; }
-  table { width:100%; border-collapse:collapse; font-size:13px; }
-  thead th { text-align:left; padding:0 10px 10px; color:var(--mut); font-size:10.5px;
-    text-transform:uppercase; letter-spacing:.6px; font-weight:600; border-bottom:1px solid var(--line); }
-  tbody td { padding:10px; border-bottom:1px solid var(--line); vertical-align:top; }
-  tbody tr:last-child td { border-bottom:0; }
-  tbody tr:hover td { background:rgba(255,255,255,.015); }
-  .badge { display:inline-flex; align-items:center; gap:6px; font-size:11px; font-weight:600;
-    padding:3px 9px; border-radius:999px; border:1px solid var(--line); white-space:nowrap; color:var(--mut2); }
-  .badge::before { content:""; width:6px; height:6px; border-radius:50%; background:currentColor; }
-  .b-done { color:var(--ok); border-color:rgba(56,211,159,.35); }
-  .b-in_progress { color:var(--acc2); border-color:rgba(91,140,255,.35); }
-  .b-pending { color:var(--mut); }
-  .b-skipped { color:var(--warn); border-color:rgba(245,181,68,.35); }
-  .timeline { max-height:260px; overflow:auto; font-family:ui-monospace,Menlo,Consolas,monospace;
-    font-size:12px; line-height:1.75; }
-  .timeline div { color:var(--mut2); } .timeline .muted { color:var(--mut); } .timeline b { color:var(--fg); font-weight:600; }
-  pre.console, pre.report { background:var(--bg); border:1px solid var(--line); border-radius:var(--r2);
-    padding:14px; max-height:340px; overflow:auto; color:var(--mut2);
-    font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px; line-height:1.55; white-space:pre-wrap; }
-  .empty { color:var(--mut); text-align:center; padding:26px 10px; font-size:13px; }
-  .empty .big { font-size:24px; opacity:.45; margin-bottom:8px; }
-  .muted { color:var(--mut); } .err { color:var(--bad); } .mt { margin-top:16px; }
-  #launchmsg { margin-top:14px; font-size:13px; min-height:18px; }
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+:root{
+  --bg:#09090B; --card:#11131A; --card2:#0d0f15; --line:rgba(255,255,255,.06); --line2:rgba(255,255,255,.10);
+  --fg:#F5F5F5; --mut:#9CA3AF; --mut2:#6b7280;
+  --acc:#6E7CFF; --acc2:#8B5CF6; --ok:#4ADE80; --warn:#FACC15; --bad:#F87171;
+  --r:14px; --r2:10px; --glow:0 0 0 1px rgba(110,124,255,.35), 0 0 24px rgba(110,124,255,.18);
+  --font:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box;} html,body{height:100%;}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--font);font-size:14px;line-height:1.55;
+  -webkit-font-smoothing:antialiased;letter-spacing:-.01em;}
+::selection{background:rgba(110,124,255,.3);}
+.mono{font-family:var(--mono);}
+::-webkit-scrollbar{width:10px;height:10px;} ::-webkit-scrollbar-thumb{background:#1c1f27;border-radius:10px;border:2px solid var(--bg);}
+
+/* top bar */
+.top{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:14px;padding:12px 20px;
+  border-bottom:1px solid var(--line);background:rgba(9,9,11,.72);backdrop-filter:blur(14px);}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:-.02em;}
+.brand img{width:26px;height:26px;border-radius:8px;}
+.tags{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.tag{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--mut);
+  border:1px solid var(--line);border-radius:999px;padding:5px 11px;background:var(--card);max-width:320px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.tag b{color:var(--fg);font-weight:500;}
+.tag.mono{font-family:var(--mono);font-size:11.5px;}
+.top .spacer{flex:1;}
+.live{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--mut);}
+.live .d{width:7px;height:7px;border-radius:50%;background:var(--mut2);}
+.live.on .d{background:var(--ok);box-shadow:0 0 0 3px rgba(74,222,128,.16);animation:pulse 1.6s infinite;}
+.btn{font-family:var(--font);font-size:13px;font-weight:600;border-radius:9px;padding:7px 13px;cursor:pointer;
+  border:1px solid var(--line2);background:#15171f;color:var(--fg);transition:.15s;}
+.btn:hover{border-color:rgba(255,255,255,.2);} .btn:active{transform:translateY(1px);}
+.btn.primary{background:linear-gradient(135deg,var(--acc),var(--acc2));border:0;box-shadow:var(--glow);}
+.btn.primary:hover{filter:brightness(1.08);}
+.btn.ghost{background:transparent;} .btn:disabled{opacity:.4;cursor:not-allowed;}
+.btn.danger{color:#ffd9d9;border-color:rgba(248,113,113,.3);background:rgba(248,113,113,.08);}
+
+/* layout */
+.wrap{max-width:1360px;margin:0 auto;padding:24px 20px 60px;}
+.grid{display:grid;grid-template-columns:1fr 340px;gap:20px;align-items:start;}
+@media(max-width:1000px){.grid{grid-template-columns:1fr;}}
+.col{display:flex;flex-direction:column;gap:20px;min-width:0;}
+.card{background:linear-gradient(180deg,var(--card),var(--card2));border:1px solid var(--line);
+  border-radius:var(--r);padding:20px;animation:rise .4s ease both;}
+.card h3{margin:0 0 16px;font-size:11px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--mut2);}
+@keyframes rise{from{opacity:0;transform:translateY(6px);}to{opacity:1;transform:none;}}
+@keyframes pulse{0%,100%{opacity:1;}50%{opacity:.4;}}
+
+/* hero */
+.hero{padding:26px;}
+.hero .state{display:flex;align-items:center;gap:12px;}
+.hero .badge{font-size:12px;font-weight:600;padding:5px 12px;border-radius:999px;border:1px solid var(--line2);
+  color:var(--mut);letter-spacing:.02em;}
+.hero .badge.run{color:var(--acc);border-color:rgba(110,124,255,.4);background:rgba(110,124,255,.08);}
+.hero .badge.ok{color:var(--ok);border-color:rgba(74,222,128,.35);background:rgba(74,222,128,.07);}
+.hero .badge.bad{color:var(--bad);border-color:rgba(248,113,113,.35);background:rgba(248,113,113,.07);}
+.hero .phase{font-size:13px;color:var(--mut);}
+.hero .action{margin:14px 0 4px;font-size:26px;font-weight:600;letter-spacing:-.02em;min-height:32px;}
+.hero .sub{color:var(--mut);font-size:13.5px;}
+.progress{height:8px;border-radius:999px;background:#0a0b10;border:1px solid var(--line);overflow:hidden;margin:20px 0 18px;}
+.progress>span{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--acc),var(--acc2));
+  border-radius:999px;transition:width .5s cubic-bezier(.4,0,.2,1);}
+.herostats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;}
+@media(max-width:640px){.herostats{grid-template-columns:repeat(2,1fr);}}
+.hstat .k{font-size:11px;color:var(--mut2);letter-spacing:.04em;}
+.hstat .v{font-size:19px;font-weight:600;margin-top:3px;letter-spacing:-.02em;}
+.hstat .v.mono{font-size:14px;color:var(--mut);}
+
+/* execution graph */
+.graph{display:flex;align-items:stretch;gap:0;}
+.node{flex:1;text-align:center;padding:14px 8px;border:1px solid var(--line);border-radius:12px;background:var(--card2);
+  transition:.35s;position:relative;}
+.node .ic{font-size:16px;} .node .nm{font-size:12px;color:var(--mut);margin-top:6px;font-weight:500;}
+.node.active{border-color:rgba(110,124,255,.5);box-shadow:var(--glow);background:rgba(110,124,255,.06);}
+.node.active .nm{color:var(--fg);}
+.node.active .ic{animation:pulse 1.4s infinite;}
+.node.done{border-color:rgba(74,222,128,.25);}
+.edge{display:flex;align-items:center;color:var(--mut2);padding:0 6px;font-size:15px;}
+@media(max-width:640px){.graph{flex-direction:column;}.edge{transform:rotate(90deg);padding:4px 0;}}
+
+/* plan cards */
+.steps{display:flex;flex-direction:column;gap:10px;}
+.step{border:1px solid var(--line);border-radius:12px;padding:14px 16px;background:var(--card2);cursor:pointer;
+  transition:.15s;display:flex;align-items:center;gap:14px;animation:rise .35s ease both;}
+.step:hover{border-color:var(--line2);transform:translateX(2px);}
+.step .num{font-family:var(--mono);font-size:12px;color:var(--mut2);min-width:20px;}
+.step .body{flex:1;min-width:0;}
+.step .title{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.step .meta{font-size:12px;color:var(--mut2);margin-top:3px;display:flex;gap:14px;flex-wrap:wrap;}
+.step .meta .mono{color:var(--mut);}
+.sbadge{font-size:11px;font-weight:600;padding:3px 10px;border-radius:999px;border:1px solid var(--line2);
+  color:var(--mut);white-space:nowrap;display:inline-flex;align-items:center;gap:6px;}
+.sbadge::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;}
+.s-done,.s-completed{color:var(--ok);border-color:rgba(74,222,128,.3);}
+.s-in_progress,.s-running{color:var(--acc);border-color:rgba(110,124,255,.35);}
+.s-rejected{color:var(--warn);border-color:rgba(250,204,21,.3);}
+.s-pending{color:var(--mut2);} .s-skipped{color:var(--warn);border-color:rgba(250,204,21,.3);}
+
+/* timeline */
+.tl{display:flex;flex-direction:column;gap:0;position:relative;max-height:420px;overflow:auto;}
+.tl .row{display:flex;gap:12px;padding:5px 0;font-size:12.5px;animation:rise .3s ease both;}
+.tl .rail{display:flex;flex-direction:column;align-items:center;}
+.tl .d{width:9px;height:9px;border-radius:50%;margin-top:5px;background:var(--mut2);flex:none;}
+.tl .row:not(:last-child) .rail::after{content:"";width:1px;flex:1;background:var(--line);margin-top:3px;}
+.tl .d.ok{background:var(--ok);} .tl .d.warn{background:var(--warn);} .tl .d.bad{background:var(--bad);}
+.tl .d.replan{background:var(--acc2);} .tl .d.arrow,.tl .d.info,.tl .d.gate{background:var(--acc);}
+.tl .txt{color:var(--fg);} .tl .t{color:var(--mut2);font-family:var(--mono);font-size:11px;}
+
+/* metrics */
+.mgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+.mstat{border:1px solid var(--line);border-radius:10px;padding:12px 13px;background:var(--card2);}
+.mstat .k{font-size:10.5px;color:var(--mut2);letter-spacing:.04em;text-transform:uppercase;}
+.mstat .v{font-size:18px;font-weight:600;margin-top:4px;letter-spacing:-.02em;}
+
+/* console */
+.term{background:#08090c;border:1px solid var(--line);border-radius:12px;overflow:hidden;}
+.term .bar{display:flex;align-items:center;gap:7px;padding:9px 13px;border-bottom:1px solid var(--line);}
+.term .bar i{width:11px;height:11px;border-radius:50%;background:#2a2d36;display:inline-block;}
+.term .bar .ttl{color:var(--mut2);font-size:12px;margin-left:6px;font-family:var(--mono);}
+.term pre{margin:0;padding:14px;max-height:340px;overflow:auto;font-family:var(--mono);font-size:12px;
+  line-height:1.6;color:#c9d1d9;white-space:pre-wrap;word-break:break-word;}
+
+/* report */
+pre.report{margin:0;background:#08090c;border:1px solid var(--line);border-radius:12px;padding:16px;
+  max-height:420px;overflow:auto;font-family:var(--mono);font-size:12px;line-height:1.6;color:var(--mut2);white-space:pre-wrap;}
+
+/* empty */
+.empty{text-align:center;color:var(--mut2);padding:60px 20px;}
+.empty .big{font-size:40px;opacity:.4;margin-bottom:14px;}
+.empty .t{font-size:16px;color:var(--mut);font-weight:500;margin-bottom:6px;}
+.empty .btn{margin-top:18px;}
+
+/* modal + drawer */
+.scrim{position:fixed;inset:0;background:rgba(5,5,7,.6);backdrop-filter:blur(3px);opacity:0;pointer-events:none;
+  transition:.2s;z-index:40;}
+.scrim.show{opacity:1;pointer-events:auto;}
+.modal{position:fixed;z-index:50;left:50%;top:50%;transform:translate(-50%,-46%);width:min(560px,92vw);
+  background:var(--card);border:1px solid var(--line2);border-radius:16px;padding:24px;opacity:0;pointer-events:none;
+  transition:.22s cubic-bezier(.4,0,.2,1);box-shadow:0 30px 80px rgba(0,0,0,.5);}
+.modal.show{opacity:1;pointer-events:auto;transform:translate(-50%,-50%);}
+.modal h2{margin:0 0 4px;font-size:18px;font-weight:700;letter-spacing:-.02em;}
+.modal .lead{color:var(--mut);font-size:13px;margin-bottom:8px;}
+.drawer{position:fixed;z-index:50;top:0;right:0;height:100%;width:min(680px,94vw);background:var(--card);
+  border-left:1px solid var(--line2);transform:translateX(102%);transition:.28s cubic-bezier(.4,0,.2,1);
+  overflow:auto;box-shadow:-30px 0 80px rgba(0,0,0,.5);}
+.drawer.show{transform:none;}
+.drawer .dh{position:sticky;top:0;background:rgba(17,19,26,.92);backdrop-filter:blur(8px);
+  padding:18px 22px;border-bottom:1px solid var(--line);display:flex;align-items:flex-start;gap:12px;}
+.drawer .dh h2{margin:0;font-size:16px;font-weight:600;letter-spacing:-.01em;}
+.drawer .dh .x{margin-left:auto;cursor:pointer;color:var(--mut);font-size:20px;line-height:1;background:none;border:0;}
+.drawer .db{padding:20px 22px;display:flex;flex-direction:column;gap:20px;}
+.sec .lab{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--mut2);margin-bottom:8px;font-weight:600;}
+.sec pre,.sec ul{margin:0;} .sec ul{padding-left:18px;color:var(--mut);}
+.sec pre{background:#08090c;border:1px solid var(--line);border-radius:10px;padding:14px;overflow:auto;max-height:360px;
+  font-family:var(--mono);font-size:12px;line-height:1.6;color:#c9d1d9;white-space:pre-wrap;word-break:break-word;}
+
+label{display:block;font-size:12px;color:var(--mut);margin:14px 0 6px;font-weight:500;}
+label:first-of-type{margin-top:0;}
+input,textarea{width:100%;background:#0b0c11;color:var(--fg);border:1px solid var(--line2);border-radius:10px;
+  padding:10px 12px;font-family:var(--font);font-size:13.5px;transition:.15s;}
+input::placeholder,textarea::placeholder{color:#565b66;}
+input:focus,textarea:focus{outline:none;border-color:var(--acc);box-shadow:0 0 0 3px rgba(110,124,255,.16);}
+textarea{min-height:150px;resize:vertical;font-family:var(--mono);font-size:12.5px;}
+.frow{display:flex;gap:10px;} .frow>*{flex:1;}
+.msg{font-size:13px;margin-top:12px;min-height:18px;} .msg.err{color:var(--bad);} .msg.ok{color:var(--ok);}
+.hint{color:var(--mut2);font-weight:400;}
 </style></head>
 <body>
-<header>
-  <div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2"
-    stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg></div>
-  <h1>loopd</h1><span class="sub">run dashboard</span>
+<div class="top">
+  <div class="brand"><img src="/assets/logo.svg" alt=""><span>loopd</span></div>
+  <div class="tags">
+    <span class="tag mono" id="t-repo" title="">—</span>
+    <span class="tag mono" id="t-branch">—</span>
+    <span class="tag" id="t-budget">—</span>
+  </div>
   <span class="spacer"></span>
-  <span class="chip"><span class="live"></span>local · auto-refreshing</span>
-</header>
-<main>
-  <section class="panel">
-    <h2>Start a run</h2>
-    <label>Target repo</label>
-    <input id="repo" placeholder="../my-app">
-    <label>Task / brief <span class="hint">— long tasks welcome (your @file)</span></label>
-    <textarea id="task" placeholder="What to build: objective, constraints, definition of done…"></textarea>
-    <div class="row">
-      <div><label>Budget ($)</label><input id="budget" type="number" step="1" min="1"></div>
-      <div><label>PM model</label><input id="pm" placeholder="default"></div>
-      <div><label>Dev model</label><input id="dev" placeholder="default"></div>
-    </div>
-    <div class="actions">
-      <button id="start" class="btn-primary">Start new run</button>
-      <button id="resume" class="btn-ghost">Resume</button>
-    </div>
-    <div id="launchmsg"></div>
-  </section>
+  <span class="live" id="live"><span class="d"></span><span id="live-t">idle</span></span>
+  <button class="btn danger" id="stop" disabled>Stop</button>
+  <button class="btn ghost" id="resume">Resume</button>
+  <button class="btn primary" id="newrun">New run</button>
+</div>
 
-  <section class="stack">
-    <div class="panel">
-      <h2>Run status</h2>
-      <div class="status-head">
-        <div id="statusline" class="status"><span class="dot"></span><span>Loading…</span></div>
-        <code class="branch" id="m-branch">–</code>
-      </div>
-      <div class="metrics">
-        <div class="metric"><div class="k">Cost</div><div class="v" id="m-cost">–</div>
-          <div class="gauge"><span id="m-costbar"></span></div></div>
-        <div class="metric"><div class="k">Steps</div><div class="v" id="m-steps">–</div></div>
-        <div class="metric"><div class="k">Replans</div><div class="v" id="m-replans">–</div></div>
-      </div>
-      <div id="current" class="current"></div>
-    </div>
+<div class="wrap">
+  <div id="app"></div>
+</div>
 
-    <div class="panel">
-      <h2>Plan</h2>
-      <table><thead><tr><th>Step</th><th>Status</th><th>Att</th><th>Rej</th><th>Cost</th><th>Commit</th></tr></thead>
-        <tbody id="steps"><tr><td colspan="6"><div class="empty"><div class="big">◍</div>No run yet — start one on the left.</div></td></tr></tbody></table>
-    </div>
+<!-- New Run modal -->
+<div class="scrim" id="scrim"></div>
+<div class="modal" id="modal">
+  <h2>New run</h2>
+  <div class="lead">loopd will plan, build, verify and commit — step by step.</div>
+  <label>Target repo</label>
+  <input id="f-repo" placeholder="../my-app">
+  <label>Task / brief <span class="hint">— long tasks welcome (your @file)</span></label>
+  <textarea id="f-task" placeholder="What to build: objective, constraints, definition of done…"></textarea>
+  <div class="frow">
+    <div><label>Budget ($)</label><input id="f-budget" type="number" min="1" step="1"></div>
+    <div><label>PM model</label><input id="f-pm" placeholder="default"></div>
+    <div><label>Dev model</label><input id="f-dev" placeholder="default"></div>
+  </div>
+  <div class="frow" style="margin-top:18px;">
+    <button class="btn primary" id="f-start">Start run</button>
+    <button class="btn ghost" id="f-cancel">Cancel</button>
+  </div>
+  <div class="msg" id="f-msg"></div>
+</div>
 
-    <div class="panel">
-      <h2>Timeline</h2>
-      <div id="timeline" class="timeline"><div class="empty">No events yet.</div></div>
-    </div>
-
-    <div class="panel">
-      <h2>Console</h2>
-      <pre class="console" id="console">Waiting for output…</pre>
-    </div>
-
-    <div class="panel" id="reportpanel" style="display:none;">
-      <h2>Report</h2>
-      <pre class="report" id="report"></pre>
-    </div>
-  </section>
-</main>
+<!-- Step drawer -->
+<div class="drawer" id="drawer">
+  <div class="dh"><h2 id="d-title">Step</h2><button class="x" id="d-close">✕</button></div>
+  <div class="db" id="d-body"></div>
+</div>
 
 <script>
-const $ = id => document.getElementById(id);
-let CFG = { default_repo:"", default_budget:25 };
+const $ = s => document.querySelector(s);
+const el = (t,c,h) => { const e=document.createElement(t); if(c)e.className=c; if(h!=null)e.innerHTML=h; return e; };
+const esc = s => (s==null?"":String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const money = n => "$"+(Number(n)||0).toFixed(2);
+let CFG={default_repo:"",default_budget:25}, REPO="", DASH_STATE=null;
+
+function setHTML(node,html){ if(node && node.dataset.sig!==html){ node.dataset.sig=html; node.innerHTML=html; } }
 
 async function init(){
-  try { CFG = await (await fetch("/api/config")).json(); } catch(e){}
-  $("repo").value = CFG.default_repo || "";
-  $("budget").value = CFG.default_budget || 25;
-  tick(); setInterval(tick, 2000);
+  try{ CFG=await (await fetch("/api/config")).json(); }catch(e){}
+  REPO=CFG.default_repo||"";
+  $("#f-repo").value=REPO; $("#f-budget").value=CFG.default_budget||25;
+  $("#newrun").onclick=()=>openModal();
+  $("#f-cancel").onclick=closeModal; $("#scrim").onclick=closeModal;
+  $("#f-start").onclick=()=>launch("new");
+  $("#resume").onclick=()=>launch("resume");
+  $("#stop").onclick=stopRun;
+  $("#d-close").onclick=()=>$("#drawer").classList.remove("show");
+  document.addEventListener("keydown",e=>{ if(e.key==="Escape"){closeModal();$("#drawer").classList.remove("show");} });
+  tick(); setInterval(tick,1500);
+  if(!REPO) openModal();
 }
-
-function repo(){ return $("repo").value.trim(); }
+function openModal(){ $("#scrim").classList.add("show"); $("#modal").classList.add("show"); }
+function closeModal(){ $("#scrim").classList.remove("show"); $("#modal").classList.remove("show"); }
 
 async function launch(mode){
-  const msg = $("launchmsg"); msg.textContent = "Launching…"; msg.className = "mt muted";
+  const msg=$("#f-msg"); const repo=(mode==="resume"?REPO:$("#f-repo").value.trim());
+  if(!repo){ msg.textContent="Enter a repo path."; msg.className="msg err"; return; }
+  msg.textContent="Launching…"; msg.className="msg";
   try{
-    const r = await fetch("/api/run", {method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({repo:repo(), task:$("task").value, budget:$("budget").value,
-        pm_model:$("pm").value, dev_model:$("dev").value, mode})});
-    const d = await r.json();
-    if(d.ok){ msg.textContent = "Started (pid "+d.pid+", "+d.mode+"). Watching…"; msg.className="mt"; }
-    else { msg.textContent = "✗ "+(d.error||"failed"); msg.className="mt err"; }
-  }catch(e){ msg.textContent="✗ "+e; msg.className="mt err"; }
+    const r=await fetch("/api/run",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({repo,task:$("#f-task").value,budget:$("#f-budget").value,
+        pm_model:$("#f-pm").value,dev_model:$("#f-dev").value,mode})});
+    const d=await r.json();
+    if(d.ok){ REPO=repo; msg.textContent="Started ("+d.mode+")"; msg.className="msg ok"; setTimeout(closeModal,700); }
+    else{ msg.textContent="✗ "+(d.error||"failed"); msg.className="msg err"; }
+  }catch(e){ msg.textContent="✗ "+e; msg.className="msg err"; }
   tick();
 }
-$("start").onclick = ()=>launch("new");
-$("resume").onclick = ()=>launch("resume");
+async function stopRun(){
+  if(!REPO) return;
+  await fetch("/api/stop",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({repo:REPO})});
+  tick();
+}
 
-function badge(s){ return '<span class="badge b-'+s+'">'+s+'</span>'; }
-function esc(s){ return (s==null?"":String(s)).replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function dur(s){ if(s==null)return"—"; s=Math.floor(s); const h=(s/3600)|0,m=((s%3600)/60)|0,x=s%60;
+  return h?`${h}h ${m}m`:m?`${m}m ${x}s`:`${x}s`; }
 
 async function tick(){
-  const rp = repo();
-  if(!rp){ $("statusline").innerHTML='<span class="dot"></span><span class="muted">Enter a repo path to watch.</span>'; return; }
-  let s;
-  try { s = await (await fetch("/api/state?repo="+encodeURIComponent(rp))).json(); } catch(e){ return; }
+  if(!REPO){ renderEmpty("Enter a repo path to begin."); return; }
+  let s; try{ s=await (await fetch("/api/state?repo="+encodeURIComponent(REPO))).json(); }catch(e){ return; }
+  DASH_STATE=s;
+  renderTop(s); renderApp(s);
+  try{ const c=await (await fetch("/api/console?repo="+encodeURIComponent(REPO))).json(); renderConsole(c.log||""); }catch(e){}
+}
 
-  // status line
-  let dot="dot", label="idle";
-  if(s.running){ dot="dot run"; label="running"; }
-  else if(s.finished){ dot="dot ok"; label="complete"; }
-  else if(s.has_escalation){ dot="dot bad"; label="stopped"; }
-  else if(!s.exists){ label="no run yet"; }
-  $("statusline").innerHTML = '<span class="'+dot+'"></span><span>'+label+'</span>'
-    + (s.task && s.task!=="(from brief)" ? ' <span class="muted">— '+esc(s.task).slice(0,120)+'</span>' : '');
+function renderTop(s){
+  const rt=$("#t-repo"); rt.textContent="repo "+shortpath(s.repo||REPO); rt.title=s.repo||REPO;
+  $("#t-branch").textContent="⎇ "+(s.branch||"—");
+  $("#t-budget").innerHTML = s.budget_usd!=null ? ("<b>"+money(s.total_cost_usd)+"</b> / $"+Number(s.budget_usd).toFixed(0)) : "—";
+  const live=$("#live");
+  live.className="live"+(s.running?" on":"");
+  $("#live-t").textContent = s.running?"running":(s.finished?"complete":(s.has_escalation?"stopped":"idle"));
+  $("#stop").disabled=!s.running; $("#resume").disabled=s.running;
+}
+function shortpath(p){ const a=(p||"").split("/"); return a.slice(-2).join("/")||p; }
 
-  // metrics
-  const cost = s.total_cost_usd||0, bud = s.budget_usd||0;
-  $("m-cost").textContent = "$"+cost.toFixed(2)+(bud?(" / $"+bud.toFixed(0)):"");
-  $("m-costbar").style.width = bud? Math.min(100,100*cost/bud)+"%" : "0%";
-  const c = s.counts||{done:0,skipped:0,total:0};
-  $("m-steps").textContent = c.total? (c.done+"/"+c.total+(c.skipped?(" ("+c.skipped+" skip)"):"")) : "–";
-  $("m-replans").textContent = (s.replans_used!=null)? s.replans_used : "–";
-  $("m-branch").textContent = s.branch || "–";
-  $("current").textContent = s.current_step ? ("▶ current: "+s.current_step.id+" — "+s.current_step.goal) : "";
+function renderEmpty(t){
+  setHTML($("#app"), `<div class="card"><div class="empty"><div class="big">◍</div>
+    <div class="t">No run yet</div><div>${esc(t)}</div>
+    <button class="btn primary" onclick="openModal()">Start a run</button></div></div>`);
+}
 
-  // steps
-  const tb = $("steps");
-  if(s.steps && s.steps.length){
-    tb.innerHTML = s.steps.map(st => '<tr><td>'+esc(st.id)+': '+esc(st.goal)+
-      (st.skip_reason?'<br><span class="muted">'+esc(st.skip_reason)+'</span>':'')+'</td><td>'+badge(st.status)+
-      '</td><td>'+st.attempts+'</td><td>'+st.rejections+'</td><td>$'+(st.cost_usd||0).toFixed(3)+
-      '</td><td class="muted">'+(st.commit||'—')+'</td></tr>').join("");
-  } else { tb.innerHTML = '<tr><td colspan="6" class="muted">No plan yet.</td></tr>'; }
+function renderApp(s){
+  if(!s.exists){ renderEmpty("Start a run to watch loopd work."); return; }
+  const c=s.counts||{done:0,skipped:0,total:0};
+  const pct=c.total?Math.round(100*(c.done+c.skipped)/c.total):0;
+  let stateCls="", stateTxt="Idle", phase="";
+  if(s.running){ stateCls="run"; stateTxt="Running"; phase=nodeLabel(s.active_node); }
+  else if(s.finished){ stateCls="ok"; stateTxt="Complete"; phase="All steps verified"; }
+  else if(s.has_escalation){ stateCls="bad"; stateTxt="Stopped"; phase="See report"; }
+  const action = s.current_step ? esc(s.current_step.goal)
+    : (s.finished?"Run complete":(s.plan_summary?esc(s.plan_summary).slice(0,120):"Awaiting plan"));
+  const stepline = c.total?`Step ${Math.min(s.step_index||c.done+c.skipped,c.total)} of ${c.total}`:"Planning";
+  const m=s.metrics||{};
+  const gaterate=m.gate_total?Math.round(100*m.gate_pass/m.gate_total)+"%":"—";
 
-  // timeline
-  const ev = (s.events||[]).slice().reverse();
-  $("timeline").innerHTML = ev.length ? ev.map(e=>{
-    const t = e.ts? new Date(e.ts*1000).toLocaleTimeString() : "";
-    return '<div><span class="muted">'+t+'</span> <b>'+esc(e.event||"")+'</b>'
-      +(e.step?(' step '+esc(e.step)):'')+(e.verdict?(' → '+esc(e.verdict)):'')+'</div>';
-  }).join("") : '<span class="muted">No events yet.</span>';
+  const hero = `<div class="card hero">
+    <div class="state"><span class="badge ${stateCls}">${stateTxt}</span><span class="phase">${esc(phase)}</span></div>
+    <div class="action">${action}</div>
+    <div class="sub">${stepline}${s.current_step?` · current: ${esc(s.current_step.id)}`:""}</div>
+    <div class="progress"><span style="width:${pct}%"></span></div>
+    <div class="herostats">
+      <div class="hstat"><div class="k">ELAPSED</div><div class="v">${dur(s.elapsed_s)}</div></div>
+      <div class="hstat"><div class="k">COST</div><div class="v">${money(s.total_cost_usd)}</div></div>
+      <div class="hstat"><div class="k">RETRIES</div><div class="v">${m.rejected||0} rej · ${m.replans||0} replan</div></div>
+      <div class="hstat"><div class="k">MODEL</div><div class="v mono">${esc(s.dev_model||s.pm_model||"—")}</div></div>
+    </div></div>`;
 
-  // console
-  try { const cl = await (await fetch("/api/console?repo="+encodeURIComponent(rp))).json();
-        $("console").textContent = cl.log || "—"; } catch(e){}
+  const nodes=["planner","developer","verification","decision"];
+  const order={planner:0,developer:1,verification:2,decision:3};
+  const ai=order[s.active_node];
+  const graph = `<div class="card"><h3>Execution</h3><div class="graph">`+
+    nodes.map((n,i)=>{
+      let cls="node"; if(s.active_node===n)cls+=" active"; else if(s.running&&ai!=null&&i<ai)cls+=" done";
+      return `<div class="${cls}"><div class="ic">${nodeIcon(n)}</div><div class="nm">${nodeLabel(n)}</div></div>`
+        + (i<nodes.length-1?`<div class="edge">→</div>`:"");
+    }).join("")+`</div></div>`;
 
-  // report
-  if(s.has_report){
-    try { const rr = await (await fetch("/api/report?repo="+encodeURIComponent(rp))).json();
-      $("report").textContent = rr.report || ""; $("reportpanel").style.display = rr.report? "block":"none"; } catch(e){}
-  } else { $("reportpanel").style.display="none"; }
+  const steps = (s.steps&&s.steps.length)
+    ? `<div class="card"><h3>Plan · ${c.done}/${c.total} accepted</h3><div class="steps">`+
+      s.steps.map((st,i)=>`<div class="step" onclick="openStep('${esc(st.id)}')">
+        <span class="num">${String(i+1).padStart(2,'0')}</span>
+        <div class="body"><div class="title">${esc(st.goal||st.id)}</div>
+          <div class="meta"><span>${st.attempts} attempt${st.attempts===1?'':'s'}</span>
+            <span>${money(st.cost_usd)}</span>
+            ${st.commit?`<span class="mono">${esc(st.commit)}</span>`:``}
+            ${st.verify_count?`<span>${st.verify_count} check${st.verify_count===1?'':'s'}</span>`:``}
+            ${st.skip_reason?`<span>· ${esc(st.skip_reason).slice(0,60)}</span>`:``}</div></div>
+        <span class="sbadge s-${st.status}">${st.status}</span></div>`).join("")+`</div></div>`
+    : `<div class="card"><h3>Plan</h3><div class="empty" style="padding:30px;">Waiting for the planner…</div></div>`;
+
+  const report = s.has_report ? `<div class="card"><h3>Report</h3><pre class="report" id="report">loading…</pre></div>` : "";
+
+  setHTML($("#app"), `<div class="grid">
+    <div class="col">${hero}${graph}${steps}
+      <div class="card"><h3>Console</h3><div class="term"><div class="bar"><i></i><i></i><i></i>
+        <span class="ttl">run.py — ${esc(shortpath(s.repo))}</span></div><pre id="console">—</pre></div></div>
+      ${report}</div>
+    <div class="col">
+      <div class="card"><h3>Metrics</h3><div class="mgrid">
+        <div class="mstat"><div class="k">Budget</div><div class="v">${money(s.total_cost_usd)}</div></div>
+        <div class="mstat"><div class="k">Runtime</div><div class="v">${dur(s.elapsed_s)}</div></div>
+        <div class="mstat"><div class="k">Accepted</div><div class="v">${m.accepted||0}</div></div>
+        <div class="mstat"><div class="k">Rejected</div><div class="v">${m.rejected||0}</div></div>
+        <div class="mstat"><div class="k">Replans</div><div class="v">${m.replans||0}</div></div>
+        <div class="mstat"><div class="k">Gate pass</div><div class="v">${gaterate}</div></div>
+      </div></div>
+      <div class="card"><h3>Timeline</h3><div class="tl" id="tl"></div></div>
+    </div></div>`);
+
+  renderTimeline(s.timeline||[]);
+  if(s.has_report) loadReport();
+}
+
+function nodeLabel(n){ return {planner:"Planner",developer:"Developer",verification:"Verification",decision:"Decision",done:"Done"}[n]||"—"; }
+function nodeIcon(n){ return {planner:"◇",developer:"⌘",verification:"✓",decision:"⟐"}[n]||"○"; }
+
+function renderTimeline(tl){
+  const node=$("#tl"); if(!node) return;
+  if(!tl.length){ setHTML(node,`<div style="color:var(--mut2);padding:8px 0;">No events yet.</div>`); return; }
+  const html = tl.slice().reverse().map(e=>{
+    const t=e.ts?new Date(e.ts*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}):"";
+    return `<div class="row"><div class="rail"><span class="d ${esc(e.kind)}"></span></div>
+      <div><div class="txt">${esc(e.text)}</div><div class="t">${t}</div></div></div>`;
+  }).join("");
+  setHTML(node,html);
+}
+
+function renderConsole(log){
+  const pre=$("#console"); if(!pre) return;
+  const atBottom = pre.scrollTop+pre.clientHeight >= pre.scrollHeight-30;
+  if(pre.dataset.sig!==log){ pre.dataset.sig=log; pre.textContent=log||"—"; if(atBottom) pre.scrollTop=pre.scrollHeight; }
+}
+async function loadReport(){
+  const pre=$("#report"); if(!pre) return;
+  try{ const r=await (await fetch("/api/report?repo="+encodeURIComponent(REPO))).json();
+    if(pre.dataset.sig!==r.report){ pre.dataset.sig=r.report; pre.textContent=r.report||""; } }catch(e){}
+}
+
+async function openStep(id){
+  const dr=$("#drawer"); $("#d-title").textContent="Step "+id;
+  $("#d-body").innerHTML=`<div style="color:var(--mut);">Loading…</div>`; dr.classList.add("show");
+  let d; try{ d=await (await fetch(`/api/step?repo=${encodeURIComponent(REPO)}&id=${encodeURIComponent(id)}`)).json(); }
+  catch(e){ $("#d-body").innerHTML=`<div class="err">Failed to load.</div>`; return; }
+  if(!d.found){ $("#d-body").innerHTML=`<div style="color:var(--mut);">No detail recorded.</div>`; return; }
+  const st=d.step;
+  $("#d-title").innerHTML=`${esc(st.goal||st.id)} <span class="sbadge s-${st.status}" style="margin-left:8px;">${st.status}</span>`;
+  const sec=(lab,inner)=>`<div class="sec"><div class="lab">${lab}</div>${inner}</div>`;
+  const list=a=>a&&a.length?`<ul>${a.map(x=>`<li>${esc(x)}</li>`).join("")}</ul>`:`<div style="color:var(--mut2);">—</div>`;
+  let html="";
+  html+=sec("Overview",`<div style="color:var(--mut);font-size:13px;line-height:1.7;">
+     Attempts ${st.attempts} · Rejections ${st.rejections} · Cost ${money(st.cost_usd)}
+     ${st.commit_sha?` · commit <span class="mono">${esc(st.commit_sha.slice(0,9))}</span>`:``}
+     ${st.skip_reason?`<br>Descoped: ${esc(st.skip_reason)}`:``}</div>`);
+  if(st.details) html+=sec("Details",`<div style="color:var(--mut);">${esc(st.details)}</div>`);
+  html+=sec("Acceptance criteria",list(st.acceptance_criteria));
+  html+=sec("Verify commands",list(st.verify));
+  if(st.dev_summary) html+=sec("Developer summary",`<pre>${esc(st.dev_summary)}</pre>`);
+  html+=sec("Handover packet"+(d.handover_count>1?` · latest of ${d.handover_count}`:""),
+     d.handover?`<pre>${esc(d.handover)}</pre>`:`<div style="color:var(--mut2);">No handover recorded (step not yet reviewed).</div>`);
+  $("#d-body").innerHTML=html;
 }
 init();
 </script>

@@ -99,6 +99,8 @@ class Ledger:
             if resume:
                 led.state = led._load_valid_state()
                 led.state["budget_usd"] = cfg.budget_usd  # reflect this invocation's --budget
+                led.state["pm_model"] = cfg.pm_model
+                led.state["dev_model"] = cfg.dev_model
                 led._ensure_git(resume=True)
                 led._save()
                 led.log({"event": "run_resumed", "total_cost_usd": led.state.get("total_cost_usd", 0)})
@@ -125,6 +127,8 @@ class Ledger:
             "started": time.time(),
             "total_cost_usd": 0.0,
             "budget_usd": cfg.budget_usd,
+            "pm_model": cfg.pm_model,
+            "dev_model": cfg.dev_model,
             "pm_session_id": None,
             "branch": led._current_ref(),
             "plan": None,
