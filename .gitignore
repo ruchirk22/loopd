@@ -10,3 +10,6 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# Design working reference (large; not a shipped asset)
+assets/design_system.png

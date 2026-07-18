@@ -1,4 +1,4 @@
-<p align="center"><img src="assets/logo.svg" width="84" alt="loopd"></p>
+<p align="center"><img src="assets/loopd.svg" width="300" alt="loopd"></p>
 
 # loopd
 

@@ -67,14 +67,15 @@ def _active_node(events, running, finished):
             return "verification"
         if ev == "dev_error":
             return "developer"
-        if ev == "step_committed":
-            return "decision"
-        if ev in ("replanned", "step_rejected", "step_descoped"):
+        if ev in ("step_committed", "replanned", "step_rejected", "step_descoped",
+                  "step_adopted_head"):
             return "decision"
         if ev == "pm_turn":
             if label.startswith("dispatch"):
                 return "developer"
-            if label.startswith("review") or label == "finalize" or label == "corrective":
+            if label.startswith("review"):
+                return "review"
+            if label in ("finalize", "corrective"):
                 return "decision"
             if label == "plan" or e.get("verdict") == "plan":
                 return "planner"
@@ -417,14 +418,15 @@ def main(argv=None) -> int:
 PAGE = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>loopd — mission control</title>
-<link rel="icon" href="/assets/logo.svg">
+<link rel="icon" href="/assets/loopd.svg">
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 :root{
-  --bg:#09090B; --card:#11131A; --card2:#0d0f15; --line:rgba(255,255,255,.06); --line2:rgba(255,255,255,.10);
+  --bg:#0B0D12; --card:#11131A; --card2:#0d0f15; --line:rgba(255,255,255,.06); --line2:rgba(255,255,255,.10);
   --fg:#F5F5F5; --mut:#9CA3AF; --mut2:#6b7280;
-  --acc:#6E7CFF; --acc2:#8B5CF6; --ok:#4ADE80; --warn:#FACC15; --bad:#F87171;
-  --r:14px; --r2:10px; --glow:0 0 0 1px rgba(110,124,255,.35), 0 0 24px rgba(110,124,255,.18);
+  --acc:#6E7CFF; --acc2:#9D7CFF; --ok:#22C55E; --warn:#FACC15; --bad:#F87171;
+  --grad:linear-gradient(135deg,#6E7CFF,#9D7CFF);
+  --r:16px; --r2:12px; --r3:8px; --glow:0 0 0 1px rgba(110,124,255,.35), 0 0 24px rgba(110,124,255,.18);
   --font:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
   --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 }
@@ -438,8 +440,8 @@ body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--font);font-
 /* top bar */
 .top{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:14px;padding:12px 20px;
   border-bottom:1px solid var(--line);background:rgba(9,9,11,.72);backdrop-filter:blur(14px);}
-.brand{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:-.02em;}
-.brand img{width:26px;height:26px;border-radius:8px;}
+.brand{display:flex;align-items:center;}
+.brand img{height:26px;width:100px;object-fit:cover;object-position:center;border-radius:6px;}
 .tags{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
 .tag{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--mut);
   border:1px solid var(--line);border-radius:999px;padding:5px 11px;background:var(--card);max-width:320px;
@@ -489,17 +491,23 @@ body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--font);font-
 .hstat .v{font-size:19px;font-weight:600;margin-top:3px;letter-spacing:-.02em;}
 .hstat .v.mono{font-size:14px;color:var(--mut);}
 
-/* execution graph */
-.graph{display:flex;align-items:stretch;gap:0;}
-.node{flex:1;text-align:center;padding:14px 8px;border:1px solid var(--line);border-radius:12px;background:var(--card2);
-  transition:.35s;position:relative;}
-.node .ic{font-size:16px;} .node .nm{font-size:12px;color:var(--mut);margin-top:6px;font-weight:500;}
+/* orchestration flow */
+.graph{display:flex;align-items:center;gap:0;position:relative;padding-bottom:24px;overflow-x:auto;}
+.node{flex:1;min-width:118px;padding:14px;border:1px solid var(--line);border-radius:12px;background:var(--card2);
+  transition:.35s;}
+.node .top{display:flex;align-items:center;gap:8px;}
+.node .ic{width:16px;height:16px;color:var(--mut2);flex:none;}
+.node .nm{font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--mut);}
+.node .sub{font-size:11px;color:var(--mut2);margin-top:7px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .node.active{border-color:rgba(110,124,255,.5);box-shadow:var(--glow);background:rgba(110,124,255,.06);}
-.node.active .nm{color:var(--fg);}
-.node.active .ic{animation:pulse 1.4s infinite;}
-.node.done{border-color:rgba(74,222,128,.25);}
-.edge{display:flex;align-items:center;color:var(--mut2);padding:0 6px;font-size:15px;}
-@media(max-width:640px){.graph{flex-direction:column;}.edge{transform:rotate(90deg);padding:4px 0;}}
+.node.active .nm{color:var(--fg);} .node.active .ic{color:var(--acc);animation:pulse 1.6s infinite;}
+.node.done{border-color:rgba(34,197,94,.22);} .node.done .ic{color:var(--ok);}
+.edge{width:24px;height:0;border-top:1.5px dashed var(--line2);flex:none;}
+.retline{position:absolute;left:9%;right:9%;bottom:6px;height:14px;border:1.5px dashed var(--line2);
+  border-top:0;border-radius:0 0 12px 12px;opacity:.6;}
+@media(max-width:720px){.graph{flex-direction:column;align-items:stretch;padding-bottom:0;}
+  .edge{width:0;height:16px;border-top:0;border-left:1.5px dashed var(--line2);margin-left:24px;}
+  .retline{display:none;}}
 
 /* plan cards */
 .steps{display:flex;flex-direction:column;gap:10px;}
@@ -590,7 +598,7 @@ textarea{min-height:150px;resize:vertical;font-family:var(--mono);font-size:12.5
 </style></head>
 <body>
 <div class="top">
-  <div class="brand"><img src="/assets/logo.svg" alt=""><span>loopd</span></div>
+  <div class="brand"><img src="/assets/loopd.svg" alt="loopd"></div>
   <div class="tags">
     <span class="tag mono" id="t-repo" title="">—</span>
     <span class="tag mono" id="t-branch">—</span>
@@ -713,7 +721,7 @@ function renderApp(s){
   const c=s.counts||{done:0,skipped:0,total:0};
   const pct=c.total?Math.round(100*(c.done+c.skipped)/c.total):0;
   let stateCls="", stateTxt="Idle", phase="";
-  if(s.running){ stateCls="run"; stateTxt="Running"; phase=nodeLabel(s.active_node); }
+  if(s.running){ stateCls="run"; stateTxt="Running"; phase=phaseLabel(s.active_node); }
   else if(s.finished){ stateCls="ok"; stateTxt="Complete"; phase="All steps verified"; }
   else if(s.has_escalation){ stateCls="bad"; stateTxt="Stopped"; phase="See report"; }
   const action = s.current_step ? esc(s.current_step.goal)
@@ -734,15 +742,16 @@ function renderApp(s){
       <div class="hstat"><div class="k">MODEL</div><div class="v mono">${esc(s.dev_model||s.pm_model||"—")}</div></div>
     </div></div>`;
 
-  const nodes=["planner","developer","verification","decision"];
-  const order={planner:0,developer:1,verification:2,decision:3};
+  const nodes=["planner","developer","verification","review","decision"];
+  const order={planner:0,developer:1,verification:2,review:3,decision:4};
   const ai=order[s.active_node];
-  const graph = `<div class="card"><h3>Execution</h3><div class="graph">`+
+  const graph = `<div class="card"><h3>Orchestration</h3><div class="graph">`+
     nodes.map((n,i)=>{
       let cls="node"; if(s.active_node===n)cls+=" active"; else if(s.running&&ai!=null&&i<ai)cls+=" done";
-      return `<div class="${cls}"><div class="ic">${nodeIcon(n)}</div><div class="nm">${nodeLabel(n)}</div></div>`
-        + (i<nodes.length-1?`<div class="edge">→</div>`:"");
-    }).join("")+`</div></div>`;
+      return `<div class="${cls}"><div class="top">${nodeSvg(n)}<span class="nm">${nodeLabel(n)}</span></div>`
+        + `<div class="sub">${esc(nodeSub(n,s))}</div></div>`
+        + (i<nodes.length-1?`<div class="edge"></div>`:"");
+    }).join("")+`<div class="retline"></div></div></div>`;
 
   const steps = (s.steps&&s.steps.length)
     ? `<div class="card"><h3>Plan · ${c.done}/${c.total} accepted</h3><div class="steps">`+
@@ -780,8 +789,18 @@ function renderApp(s){
   if(s.has_report) loadReport();
 }
 
-function nodeLabel(n){ return {planner:"Planner",developer:"Developer",verification:"Verification",decision:"Decision",done:"Done"}[n]||"—"; }
-function nodeIcon(n){ return {planner:"◇",developer:"⌘",verification:"✓",decision:"⟐"}[n]||"○"; }
+function nodeLabel(n){ return {planner:"Plan",developer:"Developer",verification:"Verification",review:"Review",decision:"Decision"}[n]||"—"; }
+function phaseLabel(n){ return {planner:"Planning",developer:"Developing",verification:"Verifying",review:"Reviewing evidence",decision:"Deciding",done:"Done"}[n]||"Working"; }
+function nodeSub(n,s){ return {planner:"PM"+(s.pm_model?" · "+s.pm_model:""),developer:"Implement",
+  verification:"Deterministic gates",review:"Evidence check",decision:"Accept / Reject / Replan"}[n]||""; }
+const _SVG={
+  planner:'<path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/><path d="M10 12h5M10 16h4"/>',
+  developer:'<path d="M9 8l-4 4 4 4"/><path d="M15 8l4 4-4 4"/>',
+  verification:'<circle cx="12" cy="12" r="9"/><path d="M8.5 12.5l2.4 2.4 4.6-5.2"/>',
+  review:'<path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12z"/><circle cx="12" cy="12" r="2.4"/>',
+  decision:'<circle cx="6" cy="6" r="2.2"/><circle cx="6" cy="18" r="2.2"/><circle cx="17" cy="9" r="2.2"/><path d="M6 8.2v7.6M6 12h6a5 5 0 0 0 4.7-3.4"/>',
+};
+function nodeSvg(n){ return '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">'+(_SVG[n]||'')+'</svg>'; }
 
 function renderTimeline(tl){
   const node=$("#tl"); if(!node) return;

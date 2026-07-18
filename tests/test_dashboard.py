@@ -52,7 +52,7 @@ class TestSnapshot(unittest.TestCase):
         self.assertEqual(s["metrics"]["accepted"], 1)
         self.assertEqual(s["metrics"]["gate_pass"], 1)
         self.assertEqual(s["metrics"]["gate_total"], 1)
-        self.assertIn(s["active_node"], ("planner", "developer", "verification", "decision", "done"))
+        self.assertIn(s["active_node"], ("planner", "developer", "verification", "review", "decision", "done"))
         self.assertTrue(any("accepted" in ev["text"] for ev in s["timeline"]))
 
     def test_snapshot_no_run(self):
@@ -117,7 +117,7 @@ class TestHTTP(unittest.TestCase):
         self.assertIn(b"New run", body)
 
     def test_asset_served(self):
-        code, body, ctype = self._get("/assets/logo.svg")
+        code, body, ctype = self._get("/assets/loopd.svg")
         self.assertEqual(code, 200)
         self.assertIn("svg", ctype)
         self.assertIn(b"<svg", body)
