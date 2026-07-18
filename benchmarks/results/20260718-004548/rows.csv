@@ -1,7 +1,0 @@
-task,arm,rep,success,cost_usd,wall_s,extra,note,check
-fizzbuzz,baseline,1,True,0.0552,30.8,turns=9,,CHECK OK: fizzbuzz
-fizzbuzz,loop,1,False,1.5378,542.1,steps=2/2 skipped=0 attempts=4 replans=1,,CHECK FAIL: importing fizzbuzz.py raised KeyError: 'fizzbuzz'
-primes,baseline,1,True,0.0735,40.0,turns=9,,CHECK OK: primes
-primes,loop,1,True,1.0569,427.0,steps=2/2 skipped=0 attempts=2 replans=1,,CHECK OK: primes
-roman,baseline,1,True,0.0628,34.6,turns=8,,CHECK OK: roman
-roman,loop,1,True,1.0007,370.4,steps=3/3 skipped=0 attempts=3 replans=0,,CHECK OK: roman
