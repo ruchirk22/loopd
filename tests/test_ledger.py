@@ -247,6 +247,28 @@ class TestLedger(unittest.TestCase):
             self.assertTrue((wt / "app.txt").exists())
         self.assertFalse(marker.exists())  # dev-planted hook never fired
 
+    def test_write_report_success_and_failure(self):
+        led = Ledger.load_or_start(self.cfg)
+        led.start("build a thing")
+        s1 = Step(id="1", goal="add feature", acceptance_criteria=["a"], verify=["true"],
+                  status="done", commit_sha="abcdef1234567890", cost_usd=0.5,
+                  dev_summary="added the feature and a test")
+        s2 = Step(id="2", goal="optional bit", acceptance_criteria=["b"], verify=["true"],
+                  status="skipped", skip_reason="not needed for MVP")
+        plan = Plan(summary="s", steps=[s1, s2])
+
+        ok = led.write_report(plan, 0).read_text()
+        self.assertIn("complete", ok)
+        self.assertIn("add feature", ok)
+        self.assertIn("abcdef123", ok)             # commit sha rendered
+        self.assertIn("Changes committed", ok)
+        self.assertIn("not needed for MVP", ok)    # descoped step's reason
+
+        bad = led.write_report(plan, 1, detail="the gate never passed").read_text()
+        self.assertIn("stopped", bad)
+        self.assertIn("Why it stopped", bad)
+        self.assertIn("the gate never passed", bad)
+
     def test_atomic_save_and_plan_roundtrip(self):
         led = Ledger.load_or_start(self.cfg)
         plan = Plan(summary="s", steps=[Step(id="1", goal="g",

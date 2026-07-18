@@ -23,6 +23,25 @@ from .plan import Plan, Step, DONE, SKIPPED
 # Bump when the state.json shape changes incompatibly; older files are refused on resume.
 SCHEMA_VERSION = 2
 
+# Terminal outcome labels for the end-of-run report, keyed by exit code.
+_OUTCOME = {
+    0: ("✅", "complete — verified done"),
+    1: ("⛔", "stopped"),
+    2: ("⚠️", "setup / plan failure"),
+    3: ("💸", "budget exceeded (resumable with --resume-run)"),
+}
+
+
+def _fmt_duration(seconds: float) -> str:
+    s = int(seconds)
+    h, r = divmod(s, 3600)
+    m, sec = divmod(r, 60)
+    if h:
+        return f"{h}h {m}m {sec}s"
+    if m:
+        return f"{m}m {sec}s"
+    return f"{sec}s"
+
 
 class BudgetExceeded(RuntimeError):
     pass
@@ -444,3 +463,61 @@ class Ledger:
         self.state["finished"] = True
         self._save()
         self.log({"event": "run_finished", "total_cost_usd": self.state["total_cost_usd"]})
+
+    def write_report(self, plan: Optional[Plan], code: int, detail: str = "") -> Path:
+        """Human-readable end-of-run report at <repo>/.agentic/report.md, written on every
+        terminal outcome. All from data already tracked in state + the plan."""
+        emoji, label = _OUTCOME.get(code, ("⛔", "stopped"))
+        st = self.state
+        started = st.get("started")
+        elapsed = _fmt_duration(time.time() - started) if started else "?"
+        task = (st.get("task") or "").strip().splitlines()
+        task = task[0][:200] if task else "(from brief)"
+
+        lines = [
+            "# loopd run report", "",
+            f"- **Outcome:** {emoji} {label} (exit {code})",
+            f"- **Task:** {task}",
+            f"- **Branch:** `{st.get('branch', '?')}`",
+            f"- **Elapsed (since run start):** {elapsed}",
+            f"- **Cost:** ${st.get('total_cost_usd', 0.0):.4f} of ${self.cfg.budget_usd:.2f} budget",
+            f"- **Replans used:** {st.get('replans_used', 0)}/{self.cfg.max_replans}",
+        ]
+        if plan and plan.steps:
+            done = [s for s in plan.steps if s.status == DONE]
+            skipped = [s for s in plan.steps if s.status == SKIPPED]
+            lines.append(f"- **Steps:** {len(done)} done, {len(skipped)} descoped "
+                         f"of {len(plan.steps)}")
+            lines += ["", "## Steps", "",
+                      "| step | status | attempts | rejections | cost | commit |",
+                      "|---|---|---|---|---|---|"]
+            for s in plan.steps:
+                sha = s.commit_sha[:9] if s.commit_sha else "—"
+                lines.append(f"| {s.id}: {s.goal[:60]} | {s.status} | {s.attempts} "
+                             f"| {s.rejections} | ${s.cost_usd:.4f} | {sha} |")
+            if done:
+                lines += ["", "## Changes committed", ""]
+                for s in done:
+                    summ = (s.dev_summary or "").strip().splitlines()
+                    summ = f" — {summ[0][:120]}" if summ else ""
+                    lines.append(f"- `{s.commit_sha[:9]}` **{s.id}** {s.goal}{summ}")
+            incomplete = [s for s in plan.steps if s.status != DONE]
+            if incomplete:
+                lines += ["", "## Not completed", ""]
+                for s in incomplete:
+                    extra = f" — {s.skip_reason}" if s.skip_reason else ""
+                    lines.append(f"- **{s.id}** ({s.status}) {s.goal}{extra}")
+        else:
+            lines.append("- **Steps:** (no plan was produced)")
+
+        if code != 0 and detail:
+            lines += ["", "## Why it stopped", "", detail.strip()[:2000],
+                      "", "See `.agentic/escalation.json` for the full context."]
+        lines += ["", "---",
+                  "State: `.agentic/state.json` · events: `.agentic/log.jsonl`"
+                  + (" · escalation: `.agentic/escalation.json`" if code != 0 else "")]
+
+        path = self.cfg.state_dir / "report.md"
+        path.write_text("\n".join(lines) + "\n")
+        self.log({"event": "report_written", "code": code})
+        return path

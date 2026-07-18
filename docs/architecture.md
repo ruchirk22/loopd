@@ -70,8 +70,9 @@ Review is grounded in ground truth the agents can't fabricate:
 ## State, commits, and resume
 
 - All state lives under `<repo>/.agentic/`: `state.json` (atomic writes), `log.jsonl`
-  (event stream), `handovers/`, `escalation.json`, and a final report. It is excluded from
-  the target repo's history.
+  (event stream), `handovers/`, `escalation.json` (on failure), and `report.md` — a
+  human-readable end-of-run summary written on every outcome. It is excluded from the
+  target repo's history.
 - Each run works on an isolated `agentic/run-<timestamp>` branch, with one commit per
   accepted step — your main branch is never touched.
 - `--resume-run` reloads `state.json` and continues at the first unfinished step. Budget

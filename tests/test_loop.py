@@ -138,6 +138,11 @@ class TestHappyPath(LoopTestBase):
         self.assertIsNone(self.fake_dev.calls[0].get("resume_session"))
         # handover packet persisted
         self.assertTrue(list((self.cfg.state_dir / "handovers").glob("step-1-*.md")))
+        # end-of-run report written on success
+        report = (self.cfg.state_dir / "report.md").read_text()
+        self.assertIn("complete", report)
+        self.assertIn("Changes committed", report)
+        self.assertIn("produce hello.txt", report)
 
 
 class TestRedGatesDescope(LoopTestBase):
@@ -222,6 +227,10 @@ class TestCorrectiveAndAbort(LoopTestBase):
         esc = json.loads((self.cfg.state_dir / "escalation.json").read_text())
         self.assertEqual(esc["reason"], "pm_abort")
         self.assertIn("owner input needed", esc["pm_reasoning"])
+        # a report is written on failure too, with the stop reason
+        report = (self.cfg.state_dir / "report.md").read_text()
+        self.assertIn("stopped", report)
+        self.assertIn("Why it stopped", report)
 
 
 class TestBudgetStopAndResume(LoopTestBase):

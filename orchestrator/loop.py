@@ -42,38 +42,38 @@ def run(task: Optional[str], cfg: Config, resume: bool = False, fresh: bool = Fa
         print(f"\nStopping on a git error during setup: {exc}\n"
               "Fix the repo state, then retry (--resume-run if a run was in progress).")
         return 1
+    code, detail = 1, ""
     try:
-        return _run(task, cfg, ledger, resume)
+        code = _run(task, cfg, ledger, resume)
     except BudgetExceeded as exc:
-        plan = ledger.load_plan()
-        path = ledger.write_escalation("budget_exceeded", plan, detail=str(exc))
-        print("\n" + ledger.report(plan))
-        print(f"\n{exc}\nEscalation report: {path}")
-        return 3
+        code, detail = 3, str(exc)
+        ledger.write_escalation("budget_exceeded", ledger.load_plan(), detail=detail)
+        print(f"\n{exc}")
     except PMTurnError as exc:
-        plan = ledger.load_plan()
-        path = ledger.write_escalation("pm_turn_failed", plan, detail=str(exc))
-        print("\n" + ledger.report(plan))
-        print(f"\nStopping: {exc}\nEscalation report: {path}")
-        return 1
+        code, detail = 1, str(exc)
+        ledger.write_escalation("pm_turn_failed", ledger.load_plan(), detail=detail)
+        print(f"\nStopping: {exc}")
     except RunAborted as exc:
-        return exc.code
+        code, detail = exc.code, str(exc)  # escalation + summary already emitted upstream
     except GitError as exc:
-        # A mid-run git failure (index.lock, disk full, worktree add) is resumable —
-        # not a pre-loop setup failure. Keep it inside the contract (exit 1) with guidance.
-        plan = ledger.load_plan()
-        path = ledger.write_escalation("git_error", plan, detail=str(exc))
-        print("\n" + ledger.report(plan))
+        # A mid-run git failure (index.lock, disk full, worktree add) is resumable.
+        code, detail = 1, str(exc)
+        ledger.write_escalation("git_error", ledger.load_plan(), detail=detail)
         print(f"\nStopping on a git error: {exc}\n"
-              f"State is saved — fix the repo and continue with --resume-run. Escalation report: {path}")
-        return 1
+              "State is saved — fix the repo and continue with --resume-run.")
     except Exception as exc:  # never let an unexpected error escape as a bare traceback
-        plan = ledger.load_plan()
-        path = ledger.write_escalation("unexpected_error", plan, detail=f"{type(exc).__name__}: {exc}")
-        print("\n" + ledger.report(plan))
+        code, detail = 1, f"{type(exc).__name__}: {exc}"
+        ledger.write_escalation("unexpected_error", ledger.load_plan(), detail=detail)
         print(f"\nStopping on an unexpected error ({type(exc).__name__}): {exc}\n"
-              f"State is saved — continue with --resume-run. Escalation report: {path}")
-        return 1
+              "State is saved — continue with --resume-run.")
+    finally:
+        # An end-of-run report on EVERY terminal outcome (success or failure).
+        try:
+            path = ledger.write_report(ledger.load_plan(), code, detail)
+            print(f"\nRun report: {path}")
+        except Exception:  # a report must never mask the real exit code
+            pass
+    return code
 
 
 def _run(task: Optional[str], cfg: Config, ledger: Ledger, resume: bool) -> int:

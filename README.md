@@ -147,8 +147,10 @@ docker run --rm --env-file .env -v "$(pwd)/../my-app:/work" loopd --budget 25
 5. **Finalize.** When no steps remain, the task's final checks *and* every accepted step's
    checks are replayed in a **pristine checkout**. Only then is the run complete.
 
-Everything is recorded under `<repo>/.agentic/` (plan state, event log, handover packets,
-final report) and committed step-by-step on an isolated `agentic/run-<timestamp>` branch.
+Every run writes a human-readable `.agentic/report.md` (outcome, per-step status, cost,
+time, commits) on completion *or* failure. That plus plan state, the event log, and the
+handover packets all live under `<repo>/.agentic/`, and work is committed step-by-step on
+an isolated `agentic/run-<timestamp>` branch.
 
 Exit codes: `0` verified done · `1` stopped with a report · `2` setup/plan problem ·
 `3` budget exceeded (resumable). A stopped run always leaves `.agentic/escalation.json`.
