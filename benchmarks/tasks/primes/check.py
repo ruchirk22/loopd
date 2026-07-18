@@ -19,6 +19,7 @@ def main():
         fail("primes.py missing")
     spec = importlib.util.spec_from_file_location("primes", path)
     mod = importlib.util.module_from_spec(spec)
+    sys.modules["primes"] = mod  # register before exec (matches a normal `import`)
     try:
         spec.loader.exec_module(mod)
     except Exception as e:  # noqa: BLE001

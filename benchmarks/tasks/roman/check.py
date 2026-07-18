@@ -18,6 +18,7 @@ def load(repo, name):
         fail(f"{name}.py missing")
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod  # register before exec (matches a normal `import`)
     try:
         spec.loader.exec_module(mod)
     except Exception as e:  # noqa: BLE001

@@ -18,6 +18,7 @@ def main():
         fail("fizzbuzz.py missing")
     spec = importlib.util.spec_from_file_location("fizzbuzz", path)
     mod = importlib.util.module_from_spec(spec)
+    sys.modules["fizzbuzz"] = mod  # register before exec (matches a normal `import`)
     try:
         spec.loader.exec_module(mod)
     except Exception as e:  # noqa: BLE001
