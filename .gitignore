@@ -5,6 +5,12 @@
 __pycache__/
 *.pyc
 
+# Packaging / build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
 # Orchestrator run state (lives inside target repos)
 .agentic/
 
@@ -12,4 +18,4 @@ __pycache__/
 .DS_Store
 
 # Design working reference (large; not a shipped asset)
-assets/design_system.png
+orchestrator/assets/design_system.png

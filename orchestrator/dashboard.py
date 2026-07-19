@@ -25,8 +25,10 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-RUN_PY = REPO_ROOT / "run.py"
-ASSETS = REPO_ROOT / "assets"
+# The engine runs as a module (`python -m orchestrator.run`) so it works both from a source
+# checkout and when pip-installed. Assets ship inside the package.
+ENGINE_CMD = [sys.executable, "-m", "orchestrator.run"]
+ASSETS = Path(__file__).resolve().parent / "assets"
 
 sys.path.insert(0, str(REPO_ROOT))
 from orchestrator.env import load_dotenv  # noqa: E402
@@ -297,8 +299,8 @@ def step_detail(repo, step_id) -> dict:
 
 def build_run_command(repo, budget, mode: str, constrained: bool = False,
                       option: str = "") -> list:
-    """The `run.py` invocation for a launch. Pure, so it's testable without spawning."""
-    cmd = [sys.executable, str(RUN_PY), "--repo", str(repo), "--budget", str(budget)]
+    """The engine invocation for a launch. Pure, so it's testable without spawning."""
+    cmd = [*ENGINE_CMD, "--repo", str(repo), "--budget", str(budget)]
     cmd.append("--resume-run" if mode == "resume" else "--fresh")
     if constrained:
         cmd.append("--constrained")

@@ -391,7 +391,7 @@ class TestForecastOnlyBriefPrecedence(unittest.TestCase):
         (self.repo / ".agentic").mkdir(parents=True, exist_ok=True)
 
     def _forecast_brief(self, task=None, brief_path=None):
-        import run as runmod
+        from orchestrator import run as runmod
         cfg = Config(repo=self.repo)
         if brief_path:
             cfg.brief_path = Path(brief_path)

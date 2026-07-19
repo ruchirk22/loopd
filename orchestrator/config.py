@@ -110,7 +110,7 @@ class Config:
         if self.state_dir is None:
             self.state_dir = self.repo / ".agentic"
         if self.prompts_dir is None:
-            self.prompts_dir = Path(__file__).resolve().parent.parent / "prompts"
+            self.prompts_dir = Path(__file__).resolve().parent / "prompts"  # packaged with orchestrator
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
     def prompt(self, name: str) -> str:

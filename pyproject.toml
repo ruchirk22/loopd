@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "loopd"
+version = "0.1.0"
+description = "An autonomous engineering runtime that only ships changes it can prove."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Ruchir Kulkarni" }]
+keywords = ["ai", "agent", "claude", "claude-code", "automation", "developer-tools", "cli"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Build Tools",
+]
+# Stdlib only — loopd deliberately has no Python dependencies. It drives the Claude Code CLI.
+dependencies = []
+
+[project.scripts]
+loopd = "orchestrator.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/ruchirk22/loopd"
+Repository = "https://github.com/ruchirk22/loopd"
+Issues = "https://github.com/ruchirk22/loopd/issues"
+
+[tool.setuptools]
+packages = ["orchestrator"]
+
+[tool.setuptools.package-data]
+# System prompts and the dashboard's static assets ship inside the package so an installed
+# `loopd` works without a source checkout.
+orchestrator = ["prompts/*.md", "assets/*.svg", "assets/*.png"]
