@@ -4,16 +4,25 @@ All notable changes to loopd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and loopd uses
 [semantic versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.1.1] — 2026-07-19
+
+A polish release: documentation, packaging, and repository quality. No runtime behavior
+changes — the engine is identical to 0.1.0.
 
 ### Changed
-- Documentation, packaging, and repository polish pass: converged on a single product
-  description across every surface, re-based the docs on the `loopd` command, de-duplicated
-  overlapping docs, and slimmed the published wheel to runtime assets only.
+- Re-based all documentation on the `loopd` command (the guides previously showed the
+  low-level `python -m orchestrator.run` engine form), converged every surface on a single
+  product description, de-duplicated overlapping docs, and rewrote the README landing page.
+- loopd's own baseline/snapshot commits in target repos are now authored as `loopd`.
 
 ### Added
-- `SECURITY.md` (vulnerability reporting), `CODE_OF_CONDUCT.md`, a `docs/` index, a
-  `github-actions` Dependabot config, Python trove classifiers, and `twine check` in CI.
+- `SECURITY.md` (private vulnerability reporting), `CODE_OF_CONDUCT.md`, a `docs/` index, a
+  `github-actions` Dependabot config, Python 3.10–3.13 trove classifiers, and `twine check`
+  plus least-privilege permissions in CI.
+
+### Removed
+- Redundant root entry shims (`run.py`, `dashboard.py`, `loopd`) and an unused logo asset;
+  fixed a broken `COPY` line in the Dockerfile.
 
 ## [0.1.0] — 2026-07-19
 
@@ -40,4 +49,5 @@ only ships changes it can prove.
   terminal outcome.
 - **pip packaging** — `pip install loopd`; stdlib-only, no dependencies.
 
+[0.1.1]: https://github.com/ruchirk22/loopd/releases/tag/v0.1.1
 [0.1.0]: https://github.com/ruchirk22/loopd/releases/tag/v0.1.0
