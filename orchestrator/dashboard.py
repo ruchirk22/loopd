@@ -30,6 +30,7 @@ ASSETS = REPO_ROOT / "assets"
 
 sys.path.insert(0, str(REPO_ROOT))
 from orchestrator.env import load_dotenv  # noqa: E402
+from orchestrator import workspace  # noqa: E402
 
 
 # ---------------------------------------------------------------- data
@@ -139,7 +140,12 @@ def snapshot(repo, running: bool = False) -> dict:
     ad = repo / ".agentic"
     state_path = ad / "state.json"
     out = {"repo": str(repo), "exists": state_path.exists(), "running": running,
-           "events": [], "timeline": []}
+           "events": [], "timeline": [],
+           # Workspace framing is available even before the first run, so the Project screen's
+           # empty state can still show what loopd knows about this project.
+           "name": repo.name, "health": workspace.health(repo),
+           "memory_count": _memory_count(repo), "forecast_accuracy": _forecast_accuracy(repo),
+           "runs": _project_runs(repo), "has_memory": (ad / "memory.md").is_file()}
     if not state_path.exists():
         return out
     try:
@@ -192,8 +198,52 @@ def snapshot(repo, running: bool = False) -> dict:
         "has_escalation": (ad / "escalation.json").is_file(),
         "has_memory": (ad / "memory.md").is_file(),
         "forecast": st.get("forecast"),  # predicted (+ 'actual' once the run ends)
+        # Workspace framing — the project has an identity, not just a run.
+        "name": repo.name,
+        "health": workspace.health(repo),
+        "memory_count": _memory_count(repo),
+        "forecast_accuracy": _forecast_accuracy(repo),
+        "runs": _project_runs(repo),
+        "escalation": _read_escalation(ad),
     })
     return out
+
+
+def _memory_count(repo) -> int:
+    from orchestrator import memory as _m
+    try:
+        return sum(len(v) for v in _m.load(repo).values())
+    except Exception:
+        return 0
+
+
+def _forecast_accuracy(repo):
+    from orchestrator import forecast as _f
+    try:
+        return _f.ForecastHistory(repo).accuracy()
+    except Exception:
+        return None
+
+
+def _project_runs(repo) -> int:
+    try:
+        e = next((p for p in workspace._load()["projects"]
+                  if p.get("path") == str(Path(repo).expanduser().resolve())), None)
+        return int(e.get("runs", 0)) if e else 0
+    except Exception:
+        return 0
+
+
+def _read_escalation(ad: Path):
+    p = ad / "escalation.json"
+    if not p.is_file():
+        return None
+    try:
+        e = json.loads(p.read_text())
+        return {"reason": e.get("reason", ""), "detail": (e.get("detail") or "")[:1200],
+                "pm_reasoning": (e.get("pm_reasoning") or "")[:1200], "step": e.get("step", "")}
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def step_detail(repo, step_id) -> dict:
@@ -339,6 +389,32 @@ class RunManager:
 
 # ---------------------------------------------------------------- HTTP
 
+def _projects_list(manager) -> list:
+    """The Projects screen: recent workspaces with their status, for the home grid."""
+    out = []
+    for e in workspace.recent(limit=24):
+        repo = e["path"]
+        rs = workspace.run_state(repo)
+        running = manager.is_running(repo)
+        if running:
+            status = "working"
+        elif rs.get("exists") and rs.get("paused"):
+            status = "paused"
+        elif rs.get("exists") and rs.get("finished"):
+            status = "done"
+        else:
+            status = "idle"
+        out.append({
+            "name": e.get("name", Path(repo).name), "path": repo, "status": status,
+            "runs": e.get("runs", 0), "last_code": e.get("last_code"),
+            "task": rs.get("task", ""), "steps_done": rs.get("steps_done", 0),
+            "steps_total": rs.get("steps_total", 0), "cost_usd": rs.get("cost_usd", 0.0),
+            "health": workspace.health(repo),
+            "forecast_accuracy": _forecast_accuracy(repo),
+        })
+    return out
+
+
 def _make_handler(manager: RunManager, default_repo: str, default_budget: float):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):
@@ -378,6 +454,8 @@ def _make_handler(manager: RunManager, default_repo: str, default_budget: float)
                 self._serve_asset(u.path[len("/assets/"):])
             elif u.path == "/api/config":
                 self._json({"default_repo": default_repo or "", "default_budget": default_budget})
+            elif u.path == "/api/projects":
+                self._json({"projects": _projects_list(manager)})
             elif u.path == "/api/state":
                 self._json(snapshot(repo, running=manager.is_running(repo)) if repo
                            else {"exists": False, "events": [], "timeline": [], "repo": ""})
@@ -455,539 +533,574 @@ def main(argv=None) -> int:
 
 
 PAGE = r"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>loopd — mission control</title>
-<link rel="icon" href="/assets/loopd.svg">
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>loopd</title>
+<link rel="icon" href="/assets/loopd_no_bg.png">
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
 :root{
-  --bg:#0B0D12; --card:#11131A; --card2:#0d0f15; --line:rgba(255,255,255,.06); --line2:rgba(255,255,255,.10);
-  --fg:#F5F5F5; --mut:#9CA3AF; --mut2:#6b7280;
-  --acc:#6E7CFF; --acc2:#9D7CFF; --ok:#22C55E; --warn:#FACC15; --bad:#F87171;
-  --grad:linear-gradient(135deg,#6E7CFF,#9D7CFF);
-  --r:16px; --r2:12px; --r3:8px; --glow:0 0 0 1px rgba(110,124,255,.35), 0 0 24px rgba(110,124,255,.18);
+  --bg:#0b0b0c; --panel:#141416; --panel-2:#101012; --raise:#17171a;
+  --line:rgba(255,255,255,.07); --line-2:rgba(255,255,255,.12);
+  --fg:#eaeaea; --fg-strong:#fbfbfb; --mut:#9b9ba0; --faint:#66666b;
+  --attention:#d6b16a; --good:#8fb28c;
+  --r:14px; --r2:10px; --r3:7px;
   --font:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
-  --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  --ease:cubic-bezier(.2,.6,.2,1);
 }
 *{box-sizing:border-box;} html,body{height:100%;}
-body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--font);font-size:14px;line-height:1.55;
-  -webkit-font-smoothing:antialiased;letter-spacing:-.01em;}
-::selection{background:rgba(110,124,255,.3);}
-.mono{font-family:var(--mono);}
-::-webkit-scrollbar{width:10px;height:10px;} ::-webkit-scrollbar-thumb{background:#1c1f27;border-radius:10px;border:2px solid var(--bg);}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--font);font-size:14px;
+  line-height:1.55;letter-spacing:-.006em;-webkit-font-smoothing:antialiased;}
+::selection{background:rgba(255,255,255,.14);}
+::-webkit-scrollbar{width:9px;height:9px;} ::-webkit-scrollbar-thumb{background:var(--line-2);border-radius:9px;}
+a{color:inherit;}
+button{font-family:inherit;font-size:13px;color:var(--fg);background:var(--raise);border:1px solid var(--line-2);
+  border-radius:var(--r3);padding:8px 14px;cursor:pointer;transition:.16s var(--ease);letter-spacing:-.01em;}
+button:hover{background:#1e1e22;border-color:rgba(255,255,255,.2);}
+button.primary{background:var(--fg-strong);color:#0a0a0a;border-color:var(--fg-strong);font-weight:560;}
+button.primary:hover{background:#fff;}
+button.ghost{background:transparent;} button:disabled{opacity:.4;cursor:not-allowed;}
+input,textarea{width:100%;background:var(--panel-2);color:var(--fg);border:1px solid var(--line-2);
+  border-radius:var(--r2);padding:11px 13px;font-family:var(--font);font-size:13.5px;transition:.16s var(--ease);}
+input:focus,textarea:focus{outline:none;border-color:rgba(255,255,255,.34);background:#0c0c0e;}
+input::placeholder,textarea::placeholder{color:var(--faint);}
+textarea{resize:vertical;min-height:92px;line-height:1.6;}
 
 /* top bar */
-.top{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:14px;padding:12px 20px;
-  border-bottom:1px solid var(--line);background:rgba(9,9,11,.72);backdrop-filter:blur(14px);}
-.brand{display:flex;align-items:center;}
-.brand img{height:26px;width:100px;object-fit:cover;object-position:center;border-radius:6px;}
-.tags{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
-.tag{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--mut);
-  border:1px solid var(--line);border-radius:999px;padding:5px 11px;background:var(--card);max-width:320px;
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.tag b{color:var(--fg);font-weight:500;}
-.tag.mono{font-family:var(--mono);font-size:11.5px;}
-.top .spacer{flex:1;}
-.live{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--mut);}
-.live .d{width:7px;height:7px;border-radius:50%;background:var(--mut2);}
-.live.on .d{background:var(--ok);box-shadow:0 0 0 3px rgba(74,222,128,.16);animation:pulse 1.6s infinite;}
-.btn{font-family:var(--font);font-size:13px;font-weight:600;border-radius:9px;padding:7px 13px;cursor:pointer;
-  border:1px solid var(--line2);background:#15171f;color:var(--fg);transition:.15s;}
-.btn:hover{border-color:rgba(255,255,255,.2);} .btn:active{transform:translateY(1px);}
-.btn.primary{background:linear-gradient(135deg,var(--acc),var(--acc2));border:0;box-shadow:var(--glow);}
-.btn.primary:hover{filter:brightness(1.08);}
-.btn.ghost{background:transparent;} .btn:disabled{opacity:.4;cursor:not-allowed;}
-.btn.danger{color:#ffd9d9;border-color:rgba(248,113,113,.3);background:rgba(248,113,113,.08);}
+.top{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:14px;height:56px;padding:0 22px;
+  background:rgba(11,11,12,.82);backdrop-filter:blur(14px);border-bottom:1px solid var(--line);}
+.brand{display:flex;align-items:center;gap:10px;cursor:pointer;}
+.logo{height:20px;filter:grayscale(1) brightness(1.7) contrast(.82);opacity:.94;}
+.crumb{color:var(--mut);font-size:13px;display:flex;align-items:center;gap:8px;}
+.crumb b{color:var(--fg);font-weight:560;}
+.crumb .sep{color:var(--faint);}
+.spacer{flex:1;}
+.dot{display:inline-flex;align-items:center;gap:8px;color:var(--mut);font-size:12.5px;}
+.dot .d{width:8px;height:8px;border-radius:50%;background:var(--faint);}
+.dot.working .d{background:var(--fg-strong);animation:breathe 2.2s var(--ease) infinite;}
+.dot.paused .d{background:transparent;border:1.5px solid var(--attention);}
+.dot.needs .d{background:var(--attention);animation:breathe 1.6s var(--ease) infinite;}
+.dot.done .d{background:var(--good);}
+@keyframes breathe{0%,100%{opacity:1;} 50%{opacity:.28;}}
+.iconbtn{background:transparent;border:none;color:var(--mut);padding:6px;font-size:15px;}
+.iconbtn:hover{color:var(--fg);background:transparent;}
 
-/* layout */
-.wrap{max-width:1360px;margin:0 auto;padding:24px 20px 60px;}
-.grid{display:grid;grid-template-columns:1fr 340px;gap:20px;align-items:start;}
-@media(max-width:1000px){.grid{grid-template-columns:1fr;}}
-.col{display:flex;flex-direction:column;gap:20px;min-width:0;}
-.card{background:linear-gradient(180deg,var(--card),var(--card2));border:1px solid var(--line);
-  border-radius:var(--r);padding:20px;animation:rise .4s ease both;}
-.card h3{margin:0 0 16px;font-size:11px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--mut2);}
-@keyframes rise{from{opacity:0;transform:translateY(6px);}to{opacity:1;transform:none;}}
-@keyframes pulse{0%,100%{opacity:1;}50%{opacity:.4;}}
+.wrap{max-width:1080px;margin:0 auto;padding:30px 22px 80px;}
+.screen{animation:rise .28s var(--ease);}
+@keyframes rise{from{opacity:0;transform:translateY(6px);} to{opacity:1;transform:none;}}
+@keyframes fade{from{opacity:0;} to{opacity:1;}}
+
+h1.page{font-size:15px;font-weight:560;color:var(--mut);letter-spacing:.02em;margin:0 0 20px;}
+
+/* cards */
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:18px 20px;
+  animation:fade .3s var(--ease);}
+.card+.card{margin-top:14px;}
+.card h3{margin:0 0 14px;font-size:11px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--faint);}
+
+/* projects grid */
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+.proj{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:18px 20px;
+  cursor:pointer;transition:.18s var(--ease);animation:fade .3s var(--ease);}
+.proj:hover{border-color:var(--line-2);transform:translateY(-1px);background:#161618;}
+.proj .ph{display:flex;align-items:center;justify-content:space-between;gap:10px;}
+.proj .nm{font-size:15.5px;font-weight:560;color:var(--fg-strong);}
+.proj .task{color:var(--mut);margin:9px 0 12px;font-size:13.5px;min-height:19px;}
+.proj .meta{color:var(--faint);font-size:12px;display:flex;gap:14px;flex-wrap:wrap;}
+.proj.new{border-style:dashed;display:flex;flex-direction:column;justify-content:center;align-items:center;
+  text-align:center;color:var(--mut);min-height:118px;gap:6px;}
+.proj.new .plus{font-size:20px;color:var(--fg);} .proj.new:hover{border-color:rgba(255,255,255,.24);}
+.chip{font-size:11px;font-weight:520;padding:3px 9px;border-radius:999px;border:1px solid var(--line-2);
+  color:var(--mut);display:inline-flex;align-items:center;gap:6px;white-space:nowrap;}
+.chip .d{width:6px;height:6px;border-radius:50%;background:var(--faint);}
+.chip.working .d{background:var(--fg-strong);animation:breathe 2.2s var(--ease) infinite;}
+.chip.paused{color:var(--attention);border-color:rgba(214,177,106,.34);} .chip.paused .d{background:var(--attention);}
+.chip.done{color:var(--good);border-color:rgba(143,178,140,.3);} .chip.done .d{background:var(--good);}
+
+/* project layout */
+.cols{display:grid;grid-template-columns:1fr 320px;gap:16px;align-items:start;}
+@media(max-width:860px){.cols{grid-template-columns:1fr;} .grid{grid-template-columns:1fr;}}
 
 /* hero */
-.hero{padding:26px;}
-.hero .state{display:flex;align-items:center;gap:12px;}
-.hero .badge{font-size:12px;font-weight:600;padding:5px 12px;border-radius:999px;border:1px solid var(--line2);
-  color:var(--mut);letter-spacing:.02em;}
-.hero .badge.run{color:var(--acc);border-color:rgba(110,124,255,.4);background:rgba(110,124,255,.08);}
-.hero .badge.ok{color:var(--ok);border-color:rgba(74,222,128,.35);background:rgba(74,222,128,.07);}
-.hero .badge.bad{color:var(--bad);border-color:rgba(248,113,113,.35);background:rgba(248,113,113,.07);}
-.hero .phase{font-size:13px;color:var(--mut);}
-.hero .action{margin:14px 0 4px;font-size:26px;font-weight:600;letter-spacing:-.02em;min-height:32px;}
+.hero{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:22px 24px;
+  animation:fade .3s var(--ease);}
+.hero.attn{border-color:rgba(214,177,106,.38);box-shadow:inset 3px 0 0 var(--attention);}
+.hero.done{box-shadow:inset 3px 0 0 var(--good);}
+.hero .state{display:flex;align-items:center;justify-content:space-between;color:var(--mut);font-size:12.5px;}
+.hero .headline{font-size:22px;font-weight:560;color:var(--fg-strong);margin:14px 0 4px;letter-spacing:-.02em;
+  line-height:1.25;}
+.hero .headline.sm{font-size:19px;}
 .hero .sub{color:var(--mut);font-size:13.5px;}
-.progress{height:8px;border-radius:999px;background:#0a0b10;border:1px solid var(--line);overflow:hidden;margin:20px 0 18px;}
-.progress>span{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--acc),var(--acc2));
-  border-radius:999px;transition:width .5s cubic-bezier(.4,0,.2,1);}
-.herostats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;}
-@media(max-width:640px){.herostats{grid-template-columns:repeat(2,1fr);}}
-.hstat .k{font-size:11px;color:var(--mut2);letter-spacing:.04em;}
-.hstat .v{font-size:19px;font-weight:600;margin-top:3px;letter-spacing:-.02em;}
-.hstat .v.mono{font-size:14px;color:var(--mut);}
+.hero .quote{color:var(--faint);font-size:12.5px;margin-top:16px;font-style:normal;}
+.bar{height:6px;border-radius:999px;background:#0a0a0b;border:1px solid var(--line);overflow:hidden;margin:18px 0 10px;position:relative;}
+.bar > span{display:block;height:100%;background:var(--fg-strong);border-radius:999px;transition:width .6s var(--ease);}
+.bar.thin{height:5px;margin:8px 0;}
+.bar .fmark{position:absolute;top:-3px;bottom:-3px;width:1px;background:var(--attention);opacity:.7;}
+.metaline{display:flex;gap:16px;color:var(--faint);font-size:12px;}
 
-/* orchestration flow */
-.graph{display:flex;align-items:center;gap:0;position:relative;padding-bottom:24px;overflow-x:auto;}
-.node{flex:1;min-width:118px;padding:14px;border:1px solid var(--line);border-radius:12px;background:var(--card2);
-  transition:.35s;}
-.node .top{display:flex;align-items:center;gap:8px;}
-.node .ic{width:16px;height:16px;color:var(--mut2);flex:none;}
-.node .nm{font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--mut);}
-.node .sub{font-size:11px;color:var(--mut2);margin-top:7px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.node.active{border-color:rgba(110,124,255,.5);box-shadow:var(--glow);background:rgba(110,124,255,.06);}
-.node.active .nm{color:var(--fg);} .node.active .ic{color:var(--acc);animation:pulse 1.6s infinite;}
-.node.done{border-color:rgba(34,197,94,.22);} .node.done .ic{color:var(--ok);}
-.edge{width:24px;height:0;border-top:1.5px dashed var(--line2);flex:none;}
-.retline{position:absolute;left:9%;right:9%;bottom:6px;height:14px;border:1.5px dashed var(--line2);
-  border-top:0;border-radius:0 0 12px 12px;opacity:.6;}
-@media(max-width:720px){.graph{flex-direction:column;align-items:stretch;padding-bottom:0;}
-  .edge{width:0;height:16px;border-top:0;border-left:1.5px dashed var(--line2);margin-left:24px;}
-  .retline{display:none;}}
+/* plan */
+.plan{margin-top:16px;}
+.planhdr{display:flex;justify-content:space-between;align-items:baseline;margin:0 0 4px;}
+.planhdr h3{margin:0;} .planhdr .cnt{color:var(--faint);font-size:12px;}
+.steps{display:flex;flex-direction:column;}
+.step{display:flex;align-items:center;gap:12px;padding:11px 8px;border-radius:var(--r3);cursor:pointer;
+  transition:.14s var(--ease);border-bottom:1px solid var(--line);}
+.step:last-child{border-bottom:none;} .step:hover{background:var(--raise);}
+.step .mk{width:16px;text-align:center;color:var(--faint);font-size:13px;flex-shrink:0;}
+.step.done .mk{color:var(--good);} .step.in_progress .mk{color:var(--fg-strong);}
+.step.needs .mk{color:var(--attention);}
+.step .g{flex:1;color:var(--fg);font-size:13.5px;}
+.step.pending .g{color:var(--mut);}
+.step .rt{color:var(--faint);font-size:12px;font-family:var(--mono);}
+.step.in_progress .rt{color:var(--mut);}
+.pulse{animation:breathe 1.8s var(--ease) infinite;}
 
-/* plan cards */
-.steps{display:flex;flex-direction:column;gap:10px;}
-.step{border:1px solid var(--line);border-radius:12px;padding:14px 16px;background:var(--card2);cursor:pointer;
-  transition:.15s;display:flex;align-items:center;gap:14px;animation:rise .35s ease both;}
-.step:hover{border-color:var(--line2);transform:translateX(2px);}
-.step .num{font-family:var(--mono);font-size:12px;color:var(--mut2);min-width:20px;}
-.step .body{flex:1;min-width:0;}
-.step .title{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.step .meta{font-size:12px;color:var(--mut2);margin-top:3px;display:flex;gap:14px;flex-wrap:wrap;}
-.step .meta .mono{color:var(--mut);}
-.sbadge{font-size:11px;font-weight:600;padding:3px 10px;border-radius:999px;border:1px solid var(--line2);
-  color:var(--mut);white-space:nowrap;display:inline-flex;align-items:center;gap:6px;}
-.sbadge::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;}
-.s-done,.s-completed{color:var(--ok);border-color:rgba(74,222,128,.3);}
-.s-in_progress,.s-running{color:var(--acc);border-color:rgba(110,124,255,.35);}
-.s-rejected{color:var(--warn);border-color:rgba(250,204,21,.3);}
-.s-pending{color:var(--mut2);} .s-skipped{color:var(--warn);border-color:rgba(250,204,21,.3);}
+/* rail */
+.rc{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);overflow:hidden;animation:fade .3s var(--ease);}
+.rc+.rc{margin-top:12px;}
+.rc .rh{display:flex;justify-content:space-between;align-items:center;padding:14px 16px;cursor:pointer;user-select:none;}
+.rc .rh .lab{font-size:11px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--faint);}
+.rc .rh .val{color:var(--fg);font-size:12.5px;}
+.rc .rh .car{color:var(--faint);transition:.2s var(--ease);}
+.rc.open .rh .car{transform:rotate(180deg);}
+.rc .body{max-height:0;overflow:hidden;transition:max-height .28s var(--ease);}
+.rc.open .body{max-height:420px;}
+.rc .body .inner{padding:0 16px 15px;color:var(--mut);font-size:12.5px;border-top:1px solid var(--line);padding-top:13px;}
+.kv{display:flex;justify-content:space-between;padding:4px 0;} .kv .k{color:var(--faint);} .kv .v{color:var(--fg);font-family:var(--mono);}
+.mlist{margin:0;padding-left:16px;} .mlist li{margin:4px 0;color:var(--mut);}
 
-/* timeline */
-.tl{display:flex;flex-direction:column;gap:0;position:relative;max-height:420px;overflow:auto;}
-.tl .row{display:flex;gap:12px;padding:5px 0;font-size:12.5px;animation:rise .3s ease both;}
-.tl .rail{display:flex;flex-direction:column;align-items:center;}
-.tl .d{width:9px;height:9px;border-radius:50%;margin-top:5px;background:var(--mut2);flex:none;}
-.tl .row:not(:last-child) .rail::after{content:"";width:1px;flex:1;background:var(--line);margin-top:3px;}
-.tl .d.ok{background:var(--ok);} .tl .d.warn{background:var(--warn);} .tl .d.bad{background:var(--bad);}
-.tl .d.replan{background:var(--acc2);} .tl .d.arrow,.tl .d.info,.tl .d.gate{background:var(--acc);}
-.tl .txt{color:var(--fg);} .tl .t{color:var(--mut2);font-family:var(--mono);font-size:11px;}
+/* report tiles */
+.tiles{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px;}
+@media(max-width:860px){.tiles{grid-template-columns:1fr;}}
+.va{display:flex;justify-content:space-between;padding:6px 0;font-size:13px;border-bottom:1px solid var(--line);}
+.va:last-child{border-bottom:none;} .va .k{color:var(--faint);} .va .v{font-family:var(--mono);}
+.va .v .arw{color:var(--faint);margin:0 6px;}
+.verified{color:var(--good);font-size:12.5px;display:flex;gap:16px;flex-wrap:wrap;margin-top:6px;}
 
-/* metrics */
-.mgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
-.mstat{border:1px solid var(--line);border-radius:10px;padding:12px 13px;background:var(--card2);}
-.mstat .k{font-size:10.5px;color:var(--mut2);letter-spacing:.04em;text-transform:uppercase;}
-.mstat .v{font-size:18px;font-weight:600;margin-top:4px;letter-spacing:-.02em;}
+/* activity + toggles */
+.toggle{color:var(--faint);font-size:12px;cursor:pointer;user-select:none;margin-top:12px;display:inline-flex;gap:6px;align-items:center;}
+.toggle:hover{color:var(--mut);}
+pre.mono{font-family:var(--mono);font-size:12px;line-height:1.65;color:#c9c9cf;white-space:pre-wrap;word-break:break-word;
+  background:var(--panel-2);border:1px solid var(--line);border-radius:var(--r2);padding:14px;max-height:340px;overflow:auto;margin:12px 0 0;}
+.tl{display:flex;flex-direction:column;gap:2px;}
+.tl .ev{display:flex;gap:10px;padding:4px 0;color:var(--mut);font-size:12.5px;}
+.tl .ev .t{color:var(--faint);font-family:var(--mono);font-size:11px;min-width:52px;}
 
-/* console */
-.term{background:#08090c;border:1px solid var(--line);border-radius:12px;overflow:hidden;}
-.term .bar{display:flex;align-items:center;gap:7px;padding:9px 13px;border-bottom:1px solid var(--line);}
-.term .bar i{width:11px;height:11px;border-radius:50%;background:#2a2d36;display:inline-block;}
-.term .bar .ttl{color:var(--mut2);font-size:12px;margin-left:6px;font-family:var(--mono);}
-.term pre{margin:0;padding:14px;max-height:340px;overflow:auto;font-family:var(--mono);font-size:12px;
-  line-height:1.6;color:#c9d1d9;white-space:pre-wrap;word-break:break-word;}
+/* actions row */
+.actions{display:flex;gap:10px;margin-top:22px;align-items:center;}
+.actions .sp{flex:1;}
 
-/* report */
-pre.report{margin:0;background:#08090c;border:1px solid var(--line);border-radius:12px;padding:16px;
-  max-height:420px;overflow:auto;font-family:var(--mono);font-size:12px;line-height:1.6;color:var(--mut2);white-space:pre-wrap;}
-
-/* empty */
-.empty{text-align:center;color:var(--mut2);padding:60px 20px;}
-.empty .big{font-size:40px;opacity:.4;margin-bottom:14px;}
-.empty .t{font-size:16px;color:var(--mut);font-weight:500;margin-bottom:6px;}
-.empty .btn{margin-top:18px;}
-
-/* modal + drawer */
-.scrim{position:fixed;inset:0;background:rgba(5,5,7,.6);backdrop-filter:blur(3px);opacity:0;pointer-events:none;
-  transition:.2s;z-index:40;}
-.scrim.show{opacity:1;pointer-events:auto;}
-.modal{position:fixed;z-index:50;left:50%;top:50%;transform:translate(-50%,-46%);width:min(560px,92vw);
-  background:var(--card);border:1px solid var(--line2);border-radius:16px;padding:24px;opacity:0;pointer-events:none;
-  transition:.22s cubic-bezier(.4,0,.2,1);box-shadow:0 30px 80px rgba(0,0,0,.5);}
-.modal.show{opacity:1;pointer-events:auto;transform:translate(-50%,-50%);}
-.modal h2{margin:0 0 4px;font-size:18px;font-weight:700;letter-spacing:-.02em;}
-.modal .lead{color:var(--mut);font-size:13px;margin-bottom:8px;}
-.drawer{position:fixed;z-index:50;top:0;right:0;height:100%;width:min(680px,94vw);background:var(--card);
-  border-left:1px solid var(--line2);transform:translateX(102%);transition:.28s cubic-bezier(.4,0,.2,1);
-  overflow:auto;box-shadow:-30px 0 80px rgba(0,0,0,.5);}
+/* drawer */
+.drawer{position:fixed;top:0;right:0;height:100%;width:440px;max-width:92vw;background:var(--panel);
+  border-left:1px solid var(--line-2);transform:translateX(100%);transition:transform .3s var(--ease);z-index:40;
+  display:flex;flex-direction:column;box-shadow:-30px 0 60px rgba(0,0,0,.4);}
 .drawer.show{transform:none;}
-.drawer .dh{position:sticky;top:0;background:rgba(17,19,26,.92);backdrop-filter:blur(8px);
-  padding:18px 22px;border-bottom:1px solid var(--line);display:flex;align-items:flex-start;gap:12px;}
-.drawer .dh h2{margin:0;font-size:16px;font-weight:600;letter-spacing:-.01em;}
-.drawer .dh .x{margin-left:auto;cursor:pointer;color:var(--mut);font-size:20px;line-height:1;background:none;border:0;}
-.drawer .db{padding:20px 22px;display:flex;flex-direction:column;gap:20px;}
-.sec .lab{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--mut2);margin-bottom:8px;font-weight:600;}
-.sec pre,.sec ul{margin:0;} .sec ul{padding-left:18px;color:var(--mut);}
-.sec pre{background:#08090c;border:1px solid var(--line);border-radius:10px;padding:14px;overflow:auto;max-height:360px;
-  font-family:var(--mono);font-size:12px;line-height:1.6;color:#c9d1d9;white-space:pre-wrap;word-break:break-word;}
+.drawer .dh{display:flex;justify-content:space-between;align-items:center;padding:18px 20px;border-bottom:1px solid var(--line);}
+.drawer .dh h2{margin:0;font-size:15px;font-weight:560;}
+.drawer .db{padding:20px;overflow:auto;}
+.drawer .x{background:transparent;border:none;color:var(--mut);font-size:15px;padding:4px 8px;}
+.sect{margin:0 0 18px;} .sect .lab{font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);margin-bottom:7px;}
+.sect ul{margin:0;padding-left:16px;} .expand{cursor:pointer;color:var(--faint);font-size:12.5px;} .expand:hover{color:var(--mut);}
 
-label{display:block;font-size:12px;color:var(--mut);margin:14px 0 6px;font-weight:500;}
-label:first-of-type{margin-top:0;}
-input,textarea{width:100%;background:#0b0c11;color:var(--fg);border:1px solid var(--line2);border-radius:10px;
-  padding:10px 12px;font-family:var(--font);font-size:13.5px;transition:.15s;}
-input::placeholder,textarea::placeholder{color:#565b66;}
-input:focus,textarea:focus{outline:none;border-color:var(--acc);box-shadow:0 0 0 3px rgba(110,124,255,.16);}
-textarea{min-height:150px;resize:vertical;font-family:var(--mono);font-size:12.5px;}
-.frow{display:flex;gap:10px;} .frow>*{flex:1;}
-.msg{font-size:13px;margin-top:12px;min-height:18px;} .msg.err{color:var(--bad);} .msg.ok{color:var(--ok);}
-.hint{color:var(--mut2);font-weight:400;}
-/* Execution forecast */
-.fc-card{margin-top:16px;border:1px solid var(--line2);border-radius:var(--r2);background:var(--card2);
-  padding:16px;box-shadow:var(--glow);}
-.fc-h{font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;
-  background:var(--grad);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:12px;}
-.fc-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;}
-.fc-stat{border:1px solid var(--line);border-radius:10px;padding:10px 11px;background:var(--card);}
-.fc-stat .k{font-size:10px;color:var(--mut2);letter-spacing:.04em;text-transform:uppercase;}
-.fc-stat .v{font-size:17px;font-weight:600;margin-top:3px;letter-spacing:-.02em;}
-.fc-gap{margin-top:12px;font-size:12.5px;padding:10px 12px;border-radius:10px;border:1px solid var(--line);}
-.fc-gap.bad{color:#fecaca;border-color:rgba(248,113,113,.35);background:rgba(248,113,113,.07);}
-.fc-gap.ok{color:#bbf7d0;border-color:rgba(34,197,94,.30);background:rgba(34,197,94,.07);}
-.fc-note{color:var(--mut2);font-size:11.5px;margin-top:6px;}
-.fc-analyzing{font-family:var(--mono);color:var(--acc);font-size:13px;letter-spacing:.08em;}
-.fc-acc{margin-top:12px;font-size:13px;color:var(--mut);} .fc-acc b{color:var(--fg);font-size:16px;}
-.btn.sm{padding:5px 11px;font-size:12px;margin-top:8px;}
-.chk{display:flex;align-items:center;gap:8px;margin-top:14px;font-size:12.5px;color:var(--mut);font-weight:400;}
-.chk input{width:auto;}
-</style></head>
+/* modal */
+.scrim{position:fixed;inset:0;background:rgba(6,6,7,.66);backdrop-filter:blur(3px);opacity:0;pointer-events:none;
+  transition:opacity .2s var(--ease);z-index:50;}
+.scrim.show{opacity:1;pointer-events:auto;}
+.modal{position:fixed;left:50%;top:50%;transform:translate(-50%,-46%) scale(.98);opacity:0;pointer-events:none;
+  width:460px;max-width:92vw;background:var(--panel);border:1px solid var(--line-2);border-radius:var(--r);
+  padding:24px;z-index:51;transition:.22s var(--ease);}
+.modal.show{transform:translate(-50%,-50%);opacity:1;pointer-events:auto;}
+.modal h2{margin:0 0 4px;font-size:16px;font-weight:600;} .modal .lead{color:var(--mut);font-size:13px;margin-bottom:18px;}
+.modal label{display:block;font-size:12px;color:var(--mut);margin:14px 0 6px;}
+.frow{display:flex;gap:10px;margin-top:20px;flex-wrap:wrap;}
+.msg{font-size:12.5px;color:var(--mut);min-height:16px;margin-top:12px;} .msg.err{color:var(--attention);}
+
+/* forecast card in modal */
+.fc .row{display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--line);font-size:14px;}
+.fc .row:last-child{border-bottom:none;} .fc .row .k{color:var(--mut);} .fc .row .v{font-family:var(--mono);color:var(--fg-strong);}
+.fc .note{margin:16px 0 4px;color:var(--mut);font-size:13px;}
+.empty{color:var(--faint);text-align:center;padding:46px 20px;}
+.center{max-width:560px;margin:8vh auto 0;text-align:center;}
+.center .big{font-size:17px;color:var(--mut);margin-bottom:22px;}
+</style>
+</head>
 <body>
 <div class="top">
-  <div class="brand"><img src="/assets/loopd.svg" alt="loopd"></div>
-  <div class="tags">
-    <span class="tag mono" id="t-repo" title="">—</span>
-    <span class="tag mono" id="t-branch">—</span>
-    <span class="tag" id="t-budget">—</span>
-  </div>
-  <span class="spacer"></span>
-  <span class="live" id="live"><span class="d"></span><span id="live-t">idle</span></span>
-  <button class="btn danger" id="stop" disabled>Stop</button>
-  <button class="btn ghost" id="resume">Resume</button>
-  <button class="btn primary" id="newrun">New run</button>
+  <div class="brand" onclick="showProjects()"><img class="logo" src="/assets/loopd_no_bg.png" alt="loopd"></div>
+  <div class="crumb" id="crumb"></div>
+  <div class="spacer"></div>
+  <div class="dot" id="dot"><span class="d"></span><span id="dotlab">all calm</span></div>
+  <button class="iconbtn" onclick="openSettings()" title="Settings">&#9881;</button>
 </div>
 
-<div class="wrap">
-  <div id="app"></div>
-</div>
+<div class="wrap"><div id="app"></div></div>
 
-<!-- New Run modal -->
-<div class="scrim" id="scrim"></div>
-<div class="modal" id="modal">
-  <h2>New run</h2>
-  <div class="lead">loopd will plan, build, verify and commit — step by step.</div>
-  <label>Target repo</label>
-  <input id="f-repo" placeholder="../my-app">
-  <label>Task / brief <span class="hint">— long tasks welcome (your @file)</span></label>
-  <textarea id="f-task" placeholder="What to build: objective, constraints, definition of done…"></textarea>
-  <div class="frow">
-    <div><label>Budget ($)</label><input id="f-budget" type="number" min="1" step="1"></div>
-    <div><label>PM model</label><input id="f-pm" placeholder="default"></div>
-    <div><label>Dev model</label><input id="f-dev" placeholder="default"></div>
-  </div>
-  <label class="chk"><input type="checkbox" id="f-constrained"> Constrained mode — prioritize critical work, defer polish</label>
-  <div id="f-forecast"></div>
-  <div class="frow" style="margin-top:18px;">
-    <button class="btn primary" id="f-start">Start run</button>
-    <button class="btn ghost" id="f-estimate">Estimate first</button>
-    <button class="btn ghost" id="f-cancel">Cancel</button>
-  </div>
-  <div class="msg" id="f-msg"></div>
-</div>
+<div class="scrim" id="scrim" onclick="closeModal()"></div>
+<div class="modal" id="modal"></div>
 
-<!-- Step drawer -->
 <div class="drawer" id="drawer">
-  <div class="dh"><h2 id="d-title">Step</h2><button class="x" id="d-close">✕</button></div>
+  <div class="dh"><h2 id="d-title">Step</h2><button class="x" onclick="closeDrawer()">&#10005;</button></div>
   <div class="db" id="d-body"></div>
 </div>
 
 <script>
-const $ = s => document.querySelector(s);
-const el = (t,c,h) => { const e=document.createElement(t); if(c)e.className=c; if(h!=null)e.innerHTML=h; return e; };
-const esc = s => (s==null?"":String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-const money = n => "$"+(Number(n)||0).toFixed(2);
-let CFG={default_repo:"",default_budget:25}, REPO="", DASH_STATE=null;
+const $=s=>document.querySelector(s);
+const esc=s=>(s==null?"":String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const money=n=>"$"+(Number(n)||0).toFixed(2);
+function fmin(m){m=Number(m)||0; if(m<1)return Math.round(m*60)+" sec"; if(m<90)return Math.round(m)+" min"; const h=(m/60)|0;return h+"h "+Math.round(m%60)+"m";}
+function dur(s){if(s==null)return"—"; s=Math.floor(s); const h=(s/3600)|0,m=((s%3600)/60)|0,x=s%60; return h?`${h}h ${m}m`:m?`${m}m ${x}s`:`${x}s`;}
+function setHTML(node,html){if(node&&node.dataset.sig!==html){node.dataset.sig=html;node.innerHTML=html;}}
 
-function setHTML(node,html){ if(node && node.dataset.sig!==html){ node.dataset.sig=html; node.innerHTML=html; } }
+let CFG={default_repo:"",default_budget:25}, REPO="", VIEW="projects", STATE=null, DRAWER=null, PENDING=null;
+const OPEN={}; // open state of rail accordions
+
+async function jget(u){try{return await (await fetch(u)).json();}catch(e){return null;}}
+async function jpost(u,b){try{const r=await fetch(u,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(b)});return {ok:r.ok,data:await r.json()};}catch(e){return {ok:false,data:{error:String(e)}};}}
 
 async function init(){
-  try{ CFG=await (await fetch("/api/config")).json(); }catch(e){}
-  REPO=CFG.default_repo||"";
-  $("#f-repo").value=REPO; $("#f-budget").value=CFG.default_budget||25;
-  $("#newrun").onclick=()=>openModal();
-  $("#f-cancel").onclick=closeModal; $("#scrim").onclick=closeModal;
-  $("#f-start").onclick=()=>launch("new");
-  $("#f-estimate").onclick=estimate;
-  $("#resume").onclick=()=>launch("resume");
-  $("#stop").onclick=stopRun;
-  $("#d-close").onclick=()=>$("#drawer").classList.remove("show");
-  document.addEventListener("keydown",e=>{ if(e.key==="Escape"){closeModal();$("#drawer").classList.remove("show");} });
-  tick(); setInterval(tick,1500);
-  if(!REPO) openModal();
+  CFG=await jget("/api/config")||CFG;
+  if(CFG.default_repo){openProject(CFG.default_repo);}
+  else{showProjects();}
+  setInterval(loop,1600);
 }
-function openModal(){ $("#scrim").classList.add("show"); $("#modal").classList.add("show"); }
-function closeModal(){ $("#scrim").classList.remove("show"); $("#modal").classList.remove("show"); }
+function loop(){ if(VIEW==="projects") renderProjects(); else if(VIEW==="project") tick(); }
 
-async function launch(mode){
-  const msg=$("#f-msg"); const repo=(mode==="resume"?REPO:$("#f-repo").value.trim());
-  if(!repo){ msg.textContent="Enter a repo path."; msg.className="msg err"; return; }
-  msg.textContent="Launching…"; msg.className="msg";
-  try{
-    const r=await fetch("/api/run",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({repo,task:$("#f-task").value,budget:$("#f-budget").value,
-        pm_model:$("#f-pm").value,dev_model:$("#f-dev").value,mode,
-        constrained:$("#f-constrained").checked})});
-    const d=await r.json();
-    if(d.ok){ REPO=repo; msg.textContent="Started ("+d.mode+")"; msg.className="msg ok"; setTimeout(closeModal,700); }
-    else{ msg.textContent="✗ "+(d.error||"failed"); msg.className="msg err"; }
-  }catch(e){ msg.textContent="✗ "+e; msg.className="msg err"; }
-  tick();
-}
+/* ---------------- top bar ---------------- */
+function setDot(kind,label){const d=$("#dot");d.className="dot"+(kind?" "+kind:"");$("#dotlab").textContent=label;}
+function setCrumb(name){ $("#crumb").innerHTML = name?`<span class="sep">&rsaquo;</span> <b>${esc(name)}</b>`:""; }
 
-async function estimate(){
-  const msg=$("#f-msg"), fc=$("#f-forecast"); const repo=$("#f-repo").value.trim();
-  if(!repo){ msg.textContent="Enter a repo path."; msg.className="msg err"; return; }
-  msg.textContent="Analyzing task…"; msg.className="msg";
-  fc.innerHTML='<div class="fc-card"><div class="fc-analyzing">████████████ analyzing…</div></div>';
-  try{
-    const r=await fetch("/api/forecast",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({repo,task:$("#f-task").value,budget:$("#f-budget").value})});
-    const d=await r.json();
-    if(d.ok){ fc.innerHTML=forecastCardHTML(d.forecast); msg.textContent=""; }
-    else{ fc.innerHTML=""; msg.textContent="✗ "+(d.error||"forecast failed"); msg.className="msg err"; }
-  }catch(e){ fc.innerHTML=""; msg.textContent="✗ "+e; msg.className="msg err"; }
-}
-function useRecommended(b){ $("#f-budget").value=b; $("#f-constrained").checked=false; }
-function fmtMin(m){ m=Number(m)||0; if(m<1)return Math.round(m*60)+" sec"; if(m<90)return Math.round(m)+" min"; const h=(m/60)|0; return h+"h "+Math.round(m%60)+"m"; }
-function riskCls(r){ r=(r||"").toLowerCase(); return r==="high"?"bad":r==="low"?"ok":"warn"; }
-function forecastCardHTML(f){
-  const gap=Number(f.budget_gap_usd)||0, short=gap>0;
-  return `<div class="fc-card"><div class="fc-h">Execution Forecast</div>
-    <div class="fc-grid">
-      <div class="fc-stat"><div class="k">Est. cost</div><div class="v">${money(f.estimated_cost_usd)}</div></div>
-      <div class="fc-stat"><div class="k">Runtime</div><div class="v">${fmtMin(f.estimated_runtime_min)}</div></div>
-      <div class="fc-stat"><div class="k">Steps</div><div class="v">${f.estimated_steps}</div></div>
-      <div class="fc-stat"><div class="k">Confidence</div><div class="v">${f.confidence}%</div></div>
-      <div class="fc-stat"><div class="k">Risk</div><div class="v"><span class="badge ${riskCls(f.risk)}">${esc(f.risk)}</span></div></div>
-      <div class="fc-stat"><div class="k">Budget</div><div class="v">${money(f.budget_usd)}</div></div>
-    </div>`+
-    (short
-      ? `<div class="fc-gap bad">Short by ${money(gap)} — recommended ${money(f.recommended_budget_usd)} for retry headroom.
-          <button class="btn ghost sm" onclick="useRecommended(${f.recommended_budget_usd})">Use ${money(f.recommended_budget_usd)}</button>
-          <div class="fc-note">Or Start anyway to run in constrained mode (core work first; may stop before every criterion).</div></div>`
-      : `<div class="fc-gap ok">Budget covers the estimate (${money(-gap)} headroom).</div>`)+
-    (f.calibration_samples?`<div class="fc-note">Calibrated on ${f.calibration_samples} prior run(s) in this repo.</div>`:"")+
-  `</div>`;
-}
-function accuracyPct(p,a){
-  let parts=[]; for(const [pk,ak] of [["estimated_cost_usd","cost_usd"],["estimated_runtime_min","runtime_min"]]){
-    const P=p[pk],A=a[ak]; if(P==null||A==null)continue; const hi=Math.max(Math.abs(P),Math.abs(A));
-    parts.push(hi<=0?100:Math.max(0,Math.min(100,100*(1-Math.abs(A-P)/hi)))); }
-  return parts.length?Math.round(parts.reduce((x,y)=>x+y,0)/parts.length*10)/10:0;
-}
-function forecastPanel(s){
-  const f=s.forecast; if(!f) return "";
-  const a=f.actual;
-  if(a){
-    const acc=accuracyPct(f,a);
-    return `<div class="card"><h3>Forecast vs actual</h3><div class="mgrid">
-      <div class="mstat"><div class="k">Cost · predicted</div><div class="v">${money(f.estimated_cost_usd)}</div></div>
-      <div class="mstat"><div class="k">Cost · actual</div><div class="v">${money(a.cost_usd)}</div></div>
-      <div class="mstat"><div class="k">Runtime · predicted</div><div class="v">${fmtMin(f.estimated_runtime_min)}</div></div>
-      <div class="mstat"><div class="k">Runtime · actual</div><div class="v">${fmtMin(a.runtime_min)}</div></div>
-      <div class="mstat"><div class="k">Steps · predicted</div><div class="v">${f.estimated_steps}</div></div>
-      <div class="mstat"><div class="k">Steps · actual</div><div class="v">${a.steps_done}/${a.steps_total}</div></div>
-    </div><div class="fc-acc">Prediction accuracy <b>${acc}%</b>
-      <div class="progress" style="margin:8px 0 0;"><span style="width:${acc}%"></span></div></div></div>`;
+/* ---------------- Projects ---------------- */
+async function showProjects(){ VIEW="projects"; REPO=""; setCrumb(""); await renderProjects(); }
+async function renderProjects(){
+  const d=await jget("/api/projects"); const projs=(d&&d.projects)||[];
+  const anyWork=projs.some(p=>p.status==="working");
+  setDot(anyWork?"working":"", anyWork?"working":"all calm");
+  const rank={working:0,paused:1,done:2,idle:3};
+  projs.sort((a,b)=>(rank[a.status]??9)-(rank[b.status]??9));
+  let cards=projs.map(p=>projCard(p)).join("");
+  const newCard=`<div class="proj new" onclick="openNew()"><div class="plus">+</div><div>New project</div>
+    <div style="font-size:12px;color:var(--faint)">folder &middot; repo &middot; an idea</div></div>`;
+  let body;
+  if(!projs.length){
+    body=`<div class="center"><div class="big">Nothing running. All quiet.</div>
+      <button class="primary" onclick="openNew()">&nbsp;+&nbsp; Start your first project &nbsp;</button>
+      <div style="margin-top:18px;color:var(--faint);font-size:12.5px">open a folder &middot; clone a repo &middot; describe an idea</div></div>`;
+  }else{
+    body=`<h1 class="page">Your projects</h1><div class="grid">${cards}${newCard}</div>`;
   }
-  return `<div class="card"><h3>Execution forecast</h3><div class="mgrid">
-    <div class="mstat"><div class="k">Est. cost</div><div class="v">${money(f.estimated_cost_usd)}</div></div>
-    <div class="mstat"><div class="k">Runtime</div><div class="v">${fmtMin(f.estimated_runtime_min)}</div></div>
-    <div class="mstat"><div class="k">Steps</div><div class="v">${f.estimated_steps}</div></div>
-    <div class="mstat"><div class="k">Confidence</div><div class="v">${f.confidence}%</div></div>
-    <div class="mstat"><div class="k">Risk</div><div class="v">${esc(f.risk)}</div></div>
-    <div class="mstat"><div class="k">Budget</div><div class="v">${money(f.chosen_budget_usd||f.budget_usd)}</div></div>
-  </div>${f.constrained?'<div class="fc-note">⚠ constrained mode — core work prioritized</div>':''}</div>`;
+  setHTML($("#app"), `<div class="screen">${body}</div>`);
 }
-async function stopRun(){
-  if(!REPO) return;
-  await fetch("/api/stop",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({repo:REPO})});
-  tick();
+function projCard(p){
+  const st=p.status; const h=p.health||{};
+  const chip=`<span class="chip ${st}"><span class="d"></span>${st}</span>`;
+  const line=(st==="idle")
+    ? `${p.runs||0} run(s)${p.forecast_accuracy!=null?` &middot; forecasts ~${Math.round(p.forecast_accuracy)}%`:""}`
+    : `${p.steps_done||0} of ${p.steps_total||0} &middot; ${money(p.cost_usd)}`;
+  const hh = h.is_repo ? `${esc(h.branch||"")}${h.dirty?` &middot; ${h.dirty_count} uncommitted`:" &middot; clean"}` : "new folder";
+  return `<div class="proj" onclick="openProject('${encodeURIComponent(p.path)}')">
+    <div class="ph"><span class="nm">${esc(p.name)}</span>${chip}</div>
+    <div class="task">${p.task?("&ldquo;"+esc(p.task)+"&rdquo;"):"&nbsp;"}</div>
+    <div class="meta"><span>${line}</span><span>${hh}</span></div></div>`;
 }
 
-function dur(s){ if(s==null)return"—"; s=Math.floor(s); const h=(s/3600)|0,m=((s%3600)/60)|0,x=s%60;
-  return h?`${h}h ${m}m`:m?`${m}m ${x}s`:`${x}s`; }
-
+/* ---------------- Project ---------------- */
+function openProject(repo){ REPO=decodeURIComponent(repo); VIEW="project"; tick(); }
 async function tick(){
-  if(!REPO){ renderEmpty("Enter a repo path to begin."); return; }
-  let s; try{ s=await (await fetch("/api/state?repo="+encodeURIComponent(REPO))).json(); }catch(e){ return; }
-  DASH_STATE=s;
-  renderTop(s); renderApp(s);
-  try{ const c=await (await fetch("/api/console?repo="+encodeURIComponent(REPO))).json(); renderConsole(c.log||""); }catch(e){}
+  if(!REPO)return;
+  const s=await jget("/api/state?repo="+encodeURIComponent(REPO)); if(!s)return;
+  STATE=s; setCrumb(s.name||REPO.split("/").pop());
+  renderProject(s);
+}
+function stateKind(s){
+  if(!s.exists) return "empty";
+  if(s.running) return "active";
+  if(s.finished) return "report";
+  return "needs"; // stopped/paused with work on disk
+}
+function renderProject(s){
+  const k=stateKind(s);
+  if(k==="active"){setDot("working","working");}
+  else if(k==="needs"){setDot("needs","needs you");}
+  else if(k==="report"){setDot("done","delivered");}
+  else{setDot("", "ready");}
+  const html = k==="empty"?viewEmpty(s): k==="active"?viewActive(s): k==="report"?viewReport(s):viewNeeds(s);
+  setHTML($("#app"), `<div class="screen">${html}</div>`);
+  if(k==="active"){ loadConsoleMaybe(); }
 }
 
-function renderTop(s){
-  const rt=$("#t-repo"); rt.textContent="repo "+shortpath(s.repo||REPO); rt.title=s.repo||REPO;
-  $("#t-branch").textContent="⎇ "+(s.branch||"—");
-  $("#t-budget").innerHTML = s.budget_usd!=null ? ("<b>"+money(s.total_cost_usd)+"</b> / $"+Number(s.budget_usd).toFixed(0)) : "—";
-  const live=$("#live");
-  live.className="live"+(s.running?" on":"");
-  $("#live-t").textContent = s.running?"running":(s.finished?"complete":(s.has_escalation?"stopped":"idle"));
-  $("#stop").disabled=!s.running; $("#resume").disabled=s.running;
+/* rail (shared) */
+function rail(s){
+  const f=s.forecast||{};
+  const h=s.health||{};
+  const acc=s.forecast_accuracy;
+  const fc = f.estimated_cost_usd!=null
+    ? `${money(f.estimated_cost_usd)} &middot; ${fmin(f.estimated_runtime_min)} &middot; ${f.confidence}%`
+    : "—";
+  const repoVal = h.is_repo?esc(h.branch||"repo"):"new";
+  return `
+  ${railCard("forecast","Forecast",fc,forecastBody(s))}
+  ${railCard("repository","Repository",repoVal,repoBody(s))}
+  ${railCard("memory","Memory",(s.memory_count||0)+" learned",memoryBody(s))}
+  ${railCard("history","History",(s.runs||0)+" run(s)",historyBody(s,acc))}`;
 }
-function shortpath(p){ const a=(p||"").split("/"); return a.slice(-2).join("/")||p; }
+function railCard(id,label,val,body){
+  const open=OPEN[id]?" open":"";
+  return `<div class="rc${open}" id="rc-${id}">
+    <div class="rh" onclick="toggleRail('${id}')"><span class="lab">${label}</span>
+      <span style="display:flex;gap:10px;align-items:center"><span class="val">${val}</span><span class="car">&#9662;</span></span></div>
+    <div class="body"><div class="inner">${body}</div></div></div>`;
+}
+function toggleRail(id){OPEN[id]=!OPEN[id]; const el=$("#rc-"+id); if(el)el.classList.toggle("open",OPEN[id]);}
+function forecastBody(s){const f=s.forecast||{}; if(f.estimated_cost_usd==null)return "No estimate for this run.";
+  const a=f.actual;
+  let r=`<div class="kv"><span class="k">estimated</span><span class="v">${money(f.estimated_cost_usd)}</span></div>
+    <div class="kv"><span class="k">runtime</span><span class="v">${fmin(f.estimated_runtime_min)}</span></div>
+    <div class="kv"><span class="k">confidence</span><span class="v">${f.confidence}%</span></div>
+    <div class="kv"><span class="k">risk</span><span class="v">${esc(f.risk||"")}</span></div>`;
+  if(a)r+=`<div class="kv"><span class="k">actual cost</span><span class="v">${money(a.cost_usd)}</span></div>`;
+  return r;}
+function repoBody(s){const h=s.health||{}; if(!h.is_repo)return "A fresh folder — I'll set up git when we start.";
+  return `<div class="kv"><span class="k">branch</span><span class="v">${esc(h.branch||"?")}</span></div>
+    <div class="kv"><span class="k">status</span><span class="v">${h.dirty?h.dirty_count+" uncommitted":"clean"}</span></div>
+    <div class="kv"><span class="k">pull request</span><span class="v" style="color:var(--faint)">with GitHub soon</span></div>`;}
+function memoryBody(s){ if(!s.has_memory)return "I'll note durable facts about this project as I learn them.";
+  return `<span class="expand" onclick="loadMemory()">view what I've learned &rarr;</span><div id="memdump"></div>`;}
+function historyBody(s,acc){ return `<div class="kv"><span class="k">runs</span><span class="v">${s.runs||0}</span></div>
+  ${acc!=null?`<div class="kv"><span class="k">forecast accuracy</span><span class="v">~${Math.round(acc)}%</span></div>`:""}
+  <div style="margin-top:8px"><span class="expand" onclick="loadReport()">open the last report &rarr;</span></div>`;}
+async function loadMemory(){const d=await jget("/api/memory?repo="+encodeURIComponent(REPO)); const el=$("#memdump"); if(el&&d)el.innerHTML=`<pre class="mono">${esc(d.memory||"")}</pre>`;}
 
-function renderEmpty(t){
-  setHTML($("#app"), `<div class="card"><div class="empty"><div class="big">◍</div>
-    <div class="t">No run yet</div><div>${esc(t)}</div>
-    <button class="btn primary" onclick="openModal()">Start a run</button></div></div>`);
+/* empty state */
+function viewEmpty(s){
+  return `<div class="cols"><div>
+    <div class="hero">
+      <div class="state"><span>Ready when you are.</span></div>
+      <div class="headline sm">What do you want built?</div>
+      <textarea id="obj" placeholder="Describe the objective — the definition of done, any constraints…"></textarea>
+      <div class="actions"><button class="primary" onclick="delegate()">Delegate &rarr;</button>
+        <span style="color:var(--faint);font-size:12px">or drop a spec, or paste an issue link</span></div>
+      <div class="msg" id="msg"></div>
+    </div></div>
+    <div>${rail(s)}</div></div>`;
 }
 
-function renderApp(s){
-  if(!s.exists){ renderEmpty("Start a run to watch loopd work."); return; }
+/* active state */
+function viewActive(s){
   const c=s.counts||{done:0,skipped:0,total:0};
   const pct=c.total?Math.round(100*(c.done+c.skipped)/c.total):0;
-  let stateCls="", stateTxt="Idle", phase="";
-  if(s.running){ stateCls="run"; stateTxt="Running"; phase=phaseLabel(s.active_node); }
-  else if(s.finished){ stateCls="ok"; stateTxt="Complete"; phase="All steps verified"; }
-  else if(s.has_escalation){ stateCls="bad"; stateTxt="Stopped"; phase="See report"; }
-  const action = s.current_step ? esc(s.current_step.goal)
-    : (s.finished?"Run complete":(s.plan_summary?esc(s.plan_summary).slice(0,120):"Awaiting plan"));
-  const stepline = c.total?`Step ${Math.min(s.step_index||c.done+c.skipped,c.total)} of ${c.total}`:"Planning";
-  const m=s.metrics||{};
-  const gaterate=m.gate_total?Math.round(100*m.gate_pass/m.gate_total)+"%":"—";
-
-  const hero = `<div class="card hero">
-    <div class="state"><span class="badge ${stateCls}">${stateTxt}</span><span class="phase">${esc(phase)}</span></div>
-    <div class="action">${action}</div>
-    <div class="sub">${stepline}${s.current_step?` · current: ${esc(s.current_step.id)}`:""}</div>
-    <div class="progress"><span style="width:${pct}%"></span></div>
-    <div class="herostats">
-      <div class="hstat"><div class="k">ELAPSED</div><div class="v">${dur(s.elapsed_s)}</div></div>
-      <div class="hstat"><div class="k">COST</div><div class="v">${money(s.total_cost_usd)}</div></div>
-      <div class="hstat"><div class="k">RETRIES</div><div class="v">${m.rejected||0} rej · ${m.replans||0} replan</div></div>
-      <div class="hstat"><div class="k">MODEL</div><div class="v mono">${esc(s.dev_model||s.pm_model||"—")}</div></div>
-    </div></div>`;
-
-  const nodes=["planner","developer","verification","review","decision"];
-  const order={planner:0,developer:1,verification:2,review:3,decision:4};
-  const ai=order[s.active_node];
-  const graph = `<div class="card"><h3>Orchestration</h3><div class="graph">`+
-    nodes.map((n,i)=>{
-      let cls="node"; if(s.active_node===n)cls+=" active"; else if(s.running&&ai!=null&&i<ai)cls+=" done";
-      return `<div class="${cls}"><div class="top">${nodeSvg(n)}<span class="nm">${nodeLabel(n)}</span></div>`
-        + `<div class="sub">${esc(nodeSub(n,s))}</div></div>`
-        + (i<nodes.length-1?`<div class="edge"></div>`:"");
-    }).join("")+`<div class="retline"></div></div></div>`;
-
-  const steps = (s.steps&&s.steps.length)
-    ? `<div class="card"><h3>Plan · ${c.done}/${c.total} accepted</h3><div class="steps">`+
-      s.steps.map((st,i)=>`<div class="step" onclick="openStep('${esc(st.id)}')">
-        <span class="num">${String(i+1).padStart(2,'0')}</span>
-        <div class="body"><div class="title">${esc(st.goal||st.id)}</div>
-          <div class="meta"><span>${st.attempts} attempt${st.attempts===1?'':'s'}</span>
-            <span>${money(st.cost_usd)}</span>
-            ${st.commit?`<span class="mono">${esc(st.commit)}</span>`:``}
-            ${st.verify_count?`<span>${st.verify_count} check${st.verify_count===1?'':'s'}</span>`:``}
-            ${st.skip_reason?`<span>· ${esc(st.skip_reason).slice(0,60)}</span>`:``}</div></div>
-        <span class="sbadge s-${st.status}">${st.status}</span></div>`).join("")+`</div></div>`
-    : `<div class="card"><h3>Plan</h3><div class="empty" style="padding:30px;">Waiting for the planner…</div></div>`;
-
-  const report = s.has_report ? `<div class="card"><h3>Report</h3><pre class="report" id="report">loading…</pre></div>` : "";
-
-  setHTML($("#app"), `<div class="grid">
-    <div class="col">${hero}${graph}${steps}
-      <div class="card"><h3>Console</h3><div class="term"><div class="bar"><i></i><i></i><i></i>
-        <span class="ttl">run.py — ${esc(shortpath(s.repo))}</span></div><pre id="console">—</pre></div></div>
-      ${report}</div>
-    <div class="col">
-      <div class="card"><h3>Metrics</h3><div class="mgrid">
-        <div class="mstat"><div class="k">Budget</div><div class="v">${money(s.total_cost_usd)}</div></div>
-        <div class="mstat"><div class="k">Runtime</div><div class="v">${dur(s.elapsed_s)}</div></div>
-        <div class="mstat"><div class="k">Accepted</div><div class="v">${m.accepted||0}</div></div>
-        <div class="mstat"><div class="k">Rejected</div><div class="v">${m.rejected||0}</div></div>
-        <div class="mstat"><div class="k">Replans</div><div class="v">${m.replans||0}</div></div>
-        <div class="mstat"><div class="k">Gate pass</div><div class="v">${gaterate}</div></div>
-      </div></div>
-      ${forecastPanel(s)}
-      <div class="card"><h3>Timeline</h3><div class="tl" id="tl"></div></div>
-      ${s.has_memory?`<div class="card"><h3>Project memory</h3><pre class="report" id="memory">loading…</pre></div>`:""}
-    </div></div>`);
-
-  renderTimeline(s.timeline||[]);
-  if(s.has_report) loadReport();
-  if(s.has_memory) loadMemory();
+  const cur=s.current_step; const node=nodeLabel(s.active_node);
+  const head=cur?esc(cur.goal):(s.plan_summary?esc(s.plan_summary):"Getting started");
+  const f=s.forecast||{}; const budget=(f.chosen_budget_usd||s.budget_usd||0);
+  const spentPct=budget?Math.min(100,100*(s.total_cost_usd/budget)):0;
+  const fmark=(budget&&f.estimated_cost_usd)?Math.min(100,100*(f.estimated_cost_usd/budget)):null;
+  return `<div class="cols"><div>
+    <div class="hero">
+      <div class="state"><span>&#9679; Working</span><span>step ${Math.min(s.step_index||c.done,c.total)} of ${c.total}</span></div>
+      <div class="headline">${head}</div>
+      <div class="sub">${node?esc(node)+"…":""}</div>
+      <div class="bar"><span style="width:${pct}%"></span></div>
+      <div class="metaline"><span>elapsed ${dur(s.elapsed_s)}</span><span>${money(s.total_cost_usd)} of ${money(budget)}</span></div>
+      <div class="quote">&ldquo;I've got it from here. Close this any time — nothing is lost.&rdquo;</div>
+    </div>
+    ${planCard(s)}
+    <div class="toggle" onclick="toggleActivity()">&#9662; Activity — timeline &amp; console</div>
+    <div id="activity"></div>
+  </div><div>${rail(s)}</div></div>`;
 }
-
-function nodeLabel(n){ return {planner:"Plan",developer:"Developer",verification:"Verification",review:"Review",decision:"Decision"}[n]||"—"; }
-function phaseLabel(n){ return {planner:"Planning",developer:"Developing",verification:"Verifying",review:"Reviewing evidence",decision:"Deciding",done:"Done"}[n]||"Working"; }
-function nodeSub(n,s){ return {planner:"PM"+(s.pm_model?" · "+s.pm_model:""),developer:"Implement",
-  verification:"Deterministic gates",review:"Evidence check",decision:"Accept / Reject / Replan"}[n]||""; }
-const _SVG={
-  planner:'<path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/><path d="M10 12h5M10 16h4"/>',
-  developer:'<path d="M9 8l-4 4 4 4"/><path d="M15 8l4 4-4 4"/>',
-  verification:'<circle cx="12" cy="12" r="9"/><path d="M8.5 12.5l2.4 2.4 4.6-5.2"/>',
-  review:'<path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12z"/><circle cx="12" cy="12" r="2.4"/>',
-  decision:'<circle cx="6" cy="6" r="2.2"/><circle cx="6" cy="18" r="2.2"/><circle cx="17" cy="9" r="2.2"/><path d="M6 8.2v7.6M6 12h6a5 5 0 0 0 4.7-3.4"/>',
-};
-function nodeSvg(n){ return '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">'+(_SVG[n]||'')+'</svg>'; }
-
-function renderTimeline(tl){
-  const node=$("#tl"); if(!node) return;
-  if(!tl.length){ setHTML(node,`<div style="color:var(--mut2);padding:8px 0;">No events yet.</div>`); return; }
-  const html = tl.slice().reverse().map(e=>{
-    const t=e.ts?new Date(e.ts*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}):"";
-    return `<div class="row"><div class="rail"><span class="d ${esc(e.kind)}"></span></div>
-      <div><div class="txt">${esc(e.text)}</div><div class="t">${t}</div></div></div>`;
+function planCard(s){
+  const c=s.counts||{}; const steps=s.steps||[];
+  const rows=steps.map((st,i)=>{
+    const cls=st.status; const mk={done:"&#10003;",in_progress:"&#9656;",skipped:"&ndash;",needs:"&#9650;"}[cls]||"&middot;";
+    const rt=st.status==="in_progress"?`<span class="rt pulse">working…</span>`
+      :(st.commit?`<span class="rt">${money(st.cost_usd)}</span>`:"");
+    return `<div class="step ${cls}" onclick="openStep('${esc(st.id)}')">
+      <span class="mk">${mk}</span><span class="g">${esc(st.goal||st.id)}</span>${rt}</div>`;
   }).join("");
-  setHTML(node,html);
+  return `<div class="plan"><div class="planhdr"><h3>Plan</h3><span class="cnt">${c.done||0} / ${c.total||0}</span></div>
+    <div class="steps">${rows||'<div class="empty">Planning the work…</div>'}</div></div>`;
+}
+function nodeLabel(n){return {planner:"Planning",developer:"Writing code",verification:"Verifying",review:"Reviewing the result",decision:"Deciding",done:"Done"}[n]||"";}
+
+/* needs-you / paused */
+function viewNeeds(s){
+  const e=s.escalation||{}; const c=s.counts||{};
+  const why=e.reason==="budget_exceeded"?"I reached the budget for this run."
+    : e.reason==="wall_clock_exceeded"?"I hit the time limit for this run."
+    : (e.detail?esc(e.detail.split("\n")[0]):"The run stopped and is waiting for you.");
+  const budgetStop=e.reason==="budget_exceeded";
+  return `<div class="cols"><div>
+    <div class="hero attn">
+      <div class="state"><span>&#9650; Paused</span><span>${c.done||0} of ${c.total||0} done</span></div>
+      <div class="headline sm">${why}</div>
+      <div class="sub">${(c.done||0)>0?"Everything I've committed so far works and is safe.":"Nothing was lost."}</div>
+      <div class="actions">
+        <button class="primary" onclick="resumeRun(${budgetStop?15:0})">${budgetStop?"Continue (+$15)":"Resume"}</button>
+        <button class="ghost" onclick="loadReport()">See what happened</button>
+      </div>
+    </div>
+    ${planCard(s)}
+    <div id="activity"></div>
+  </div><div>${rail(s)}</div></div>`;
 }
 
-function renderConsole(log){
-  const pre=$("#console"); if(!pre) return;
-  const atBottom = pre.scrollTop+pre.clientHeight >= pre.scrollHeight-30;
-  if(pre.dataset.sig!==log){ pre.dataset.sig=log; pre.textContent=log||"—"; if(atBottom) pre.scrollTop=pre.scrollHeight; }
+/* completion report */
+function viewReport(s){
+  const f=s.forecast||{}; const a=f.actual||{}; const c=s.counts||{};
+  const task=(s.task||"").split("\n")[0];
+  const acc=(f.estimated_cost_usd!=null&&a.cost_usd!=null)?accuracyPct(f,a):null;
+  const vt=`<div class="tiles">
+    <div class="card"><h3>Forecast vs actual</h3>
+      ${vaRow("cost",money(f.estimated_cost_usd),money(a.cost_usd))}
+      ${vaRow("time",fmin(f.estimated_runtime_min),fmin(a.runtime_min))}
+      ${vaRow("steps",f.estimated_steps,(a.steps_done!=null?a.steps_done:c.done))}
+      ${acc!=null?`<div class="va"><span class="k">accuracy</span><span class="v">${acc}%</span></div>`:""}
+    </div>
+    <div class="card"><h3>Pull request</h3>
+      <div style="color:var(--mut);font-size:13px">Branch <span style="font-family:var(--mono);color:var(--fg)">${esc(s.branch||"")}</span> is ready.</div>
+      <div style="color:var(--faint);font-size:12.5px;margin-top:10px">I'll open the PR here once GitHub integration lands.</div>
+    </div>
+    <div class="card"><h3>What I learned</h3>
+      ${s.has_memory?`<div style="color:var(--good);font-size:12.5px">&#43; saved ${s.memory_count} note(s) to project memory</div>
+        <span class="expand" onclick="loadMemory()">view &rarr;</span><div id="memdump"></div>`:'<div style="color:var(--faint)">Nothing new to remember this time.</div>'}
+    </div>
+    <div class="card"><h3>The work &middot; ${c.total||0} steps</h3>${workList(s)}</div>
+  </div>`;
+  return `<div class="screen">
+    <div class="hero done">
+      <div class="state"><span>&#10003; Delivered</span><span>${dur(s.elapsed_s)} &middot; ${money(s.total_cost_usd)}</span></div>
+      <div class="headline">Done${task?" — "+esc(task):""}</div>
+      <div class="verified">&#10003; every step's checks &nbsp;&nbsp; &#10003; full replay in a clean checkout</div>
+    </div>
+    ${vt}
+    <div class="actions"><button class="primary" onclick="freshObjective()">Start another objective</button>
+      <span class="sp"></span><button class="ghost" onclick="showProjects()">&larr; Projects</button></div>
+  </div>`;
 }
-async function loadReport(){
-  const pre=$("#report"); if(!pre) return;
-  try{ const r=await (await fetch("/api/report?repo="+encodeURIComponent(REPO))).json();
-    if(pre.dataset.sig!==r.report){ pre.dataset.sig=r.report; pre.textContent=r.report||""; } }catch(e){}
+function vaRow(k,p,a){return `<div class="va"><span class="k">${k}</span><span class="v">${p}<span class="arw">&rarr;</span>${a}</span></div>`;}
+function workList(s){const steps=(s.steps||[]);
+  const rows=steps.slice(0,4).map(st=>`<div class="va"><span class="k">${esc(st.goal||st.id)}</span>
+    <span class="v">${st.commit?esc(st.commit)+" ":""}${money(st.cost_usd)}</span></div>`).join("");
+  const more=steps.length>4?`<div class="toggle" onclick="openStep('${esc(steps[4].id)}')">${steps.length-4} more &rarr;</div>`:"";
+  return rows+more;}
+function accuracyPct(p,a){let ps=[];for(const [pk,ak] of [["estimated_cost_usd","cost_usd"],["estimated_runtime_min","runtime_min"]]){const P=p[pk],A=a[ak];if(P==null||A==null)continue;const hi=Math.max(Math.abs(P),Math.abs(A));ps.push(hi<=0?100:Math.max(0,Math.min(100,100*(1-Math.abs(A-P)/hi))));}return ps.length?Math.round(ps.reduce((x,y)=>x+y,0)/ps.length*10)/10:0;}
+
+/* ---------------- activity / console ---------------- */
+let ACTIVITY=false;
+function toggleActivity(){ACTIVITY=!ACTIVITY; renderActivity();}
+async function renderActivity(){const el=$("#activity"); if(!el)return;
+  if(!ACTIVITY){el.innerHTML="";return;}
+  const tl=(STATE&&STATE.timeline)||[];
+  const rows=tl.slice().reverse().map(e=>`<div class="ev"><span class="t">${tfmt(e.ts)}</span><span>${esc(e.text)}</span></div>`).join("");
+  const con=await jget("/api/console?repo="+encodeURIComponent(REPO));
+  el.innerHTML=`<div class="card"><h3>Timeline</h3><div class="tl">${rows||'<span style="color:var(--faint)">—</span>'}</div></div>
+    <div class="card"><h3>Console</h3><pre class="mono">${esc((con&&con.log)||"—")}</pre></div>`;}
+function loadConsoleMaybe(){ if(ACTIVITY) renderActivity(); }
+function tfmt(ts){if(!ts)return "";const d=new Date(ts*1000);return d.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"});}
+
+/* ---------------- step drawer ---------------- */
+async function openStep(id){const d=await jget("/api/step?repo="+encodeURIComponent(REPO)+"&id="+encodeURIComponent(id));
+  if(!d||!d.found){return;} const st=d.step;
+  const acc=(st.acceptance_criteria||[]).map(a=>`<li>${esc(a)}</li>`).join("");
+  const verified=st.status==="done";
+  $("#d-title").innerHTML=`Step ${esc(st.id)} &middot; <span style="color:var(--mut)">${esc(st.status)}</span>`;
+  $("#d-body").innerHTML=`
+    <div class="sect"><div class="lab">Goal</div><div>${esc(st.goal||"")}</div>${st.details?`<div style="color:var(--mut);margin-top:6px">${esc(st.details)}</div>`:""}</div>
+    ${acc?`<div class="sect"><div class="lab">Acceptance</div><ul>${acc}</ul></div>`:""}
+    <div class="sect"><div class="lab">Verification</div>
+      <div style="color:${verified?'var(--good)':'var(--mut)'}">${verified?"&#10003; all checks passed":(st.verify?esc(st.verify.length+" check(s)"):"—")}</div></div>
+    ${st.dev_summary?`<div class="sect"><div class="lab">What the developer did</div><div style="color:var(--mut)">${esc(st.dev_summary)}</div></div>`:""}
+    ${d.handover?`<div class="sect"><div class="lab">Handover</div><span class="expand" onclick="this.nextElementSibling.style.display='block';this.style.display='none'">show the diff &amp; gate transcript &rarr;</span>
+      <pre class="mono" style="display:none">${esc(d.handover)}</pre></div>`:""}
+    ${st.commit_sha?`<div class="sect"><div class="lab">Commit</div><span style="font-family:var(--mono);color:var(--mut)">${esc(st.commit_sha.slice(0,12))}</span></div>`:""}`;
+  $("#drawer").classList.add("show");
 }
-async function loadMemory(){
-  const pre=$("#memory"); if(!pre) return;
-  try{ const r=await (await fetch("/api/memory?repo="+encodeURIComponent(REPO))).json();
-    if(pre.dataset.sig!==r.memory){ pre.dataset.sig=r.memory; pre.textContent=r.memory||"(empty)"; } }catch(e){}
+function closeDrawer(){$("#drawer").classList.remove("show");}
+
+/* ---------------- report / memory loaders ---------------- */
+async function loadReport(){const d=await jget("/api/report?repo="+encodeURIComponent(REPO));
+  openModalHTML(`<h2>Run report</h2><div class="lead">The full write-up.</div>
+    <pre class="mono" style="max-height:52vh">${esc((d&&d.report)||"No report yet.")}</pre>
+    <div class="frow"><button class="ghost" onclick="closeModal()">Close</button></div>`);}
+
+/* ---------------- delegate / forecast / run ---------------- */
+async function delegate(){const t=$("#obj").value.trim(); const msg=$("#msg");
+  if(!t){msg.textContent="Tell me what to build.";msg.className="msg err";return;}
+  msg.textContent="Estimating…"; msg.className="msg";
+  const {data}=await jpost("/api/forecast",{repo:REPO,task:t,budget:CFG.default_budget});
+  if(!data||!data.ok){msg.textContent="Couldn't estimate — you can still start."; forecastModal(null,t); return;}
+  msg.textContent=""; forecastModal(data.forecast,t);
+}
+function freshObjective(){ if(STATE) STATE.exists=false; renderProject(Object.assign({},STATE,{exists:false,finished:false,running:false})); }
+function forecastModal(f,task){
+  PENDING={task, budget: (f?f.budget_usd:CFG.default_budget), constrained:false};
+  let body;
+  if(f){
+    const gap=Number(f.budget_gap_usd)||0, short=gap>0;
+    body=`<h2>Execution forecast</h2><div class="lead">My estimate before we start.</div>
+    <div class="fc">
+      <div class="row"><span class="k">Estimated cost</span><span class="v">${money(f.estimated_cost_usd)}</span></div>
+      <div class="row"><span class="k">Estimated time</span><span class="v">${fmin(f.estimated_runtime_min)}</span></div>
+      <div class="row"><span class="k">Steps</span><span class="v">${f.estimated_steps}</span></div>
+      <div class="row"><span class="k">Confidence</span><span class="v">${f.confidence}%</span></div>
+      <div class="row"><span class="k">Risk</span><span class="v">${esc(f.risk||"")}</span></div>
+    </div>
+    ${short?`<div class="note">Your budget ${money(f.budget_usd)} is short by ${money(gap)}. I'd set ${money(f.recommended_budget_usd)} for retry room.</div>
+      <div class="frow"><button class="primary" onclick="startRun(${f.recommended_budget_usd},false)">Raise to ${money(f.recommended_budget_usd)}</button>
+        <button onclick="startRun(${f.budget_usd},true)">Keep ${money(f.budget_usd)} &middot; focus on core</button></div>`
+     :`<div class="note">Within your ${money(f.budget_usd)} budget.</div>
+      <div class="frow"><button class="primary" onclick="startRun(${f.budget_usd},false)">Start</button></div>`}
+    <div class="frow" style="margin-top:8px"><button class="ghost" onclick="closeModal()">Not now</button></div>`;
+  }else{
+    body=`<h2>Start the run?</h2><div class="lead">I couldn't produce an estimate, but I can still build it.</div>
+    <div class="frow"><button class="primary" onclick="startRun(${CFG.default_budget},false)">Start</button>
+      <button class="ghost" onclick="closeModal()">Not now</button></div>`;
+  }
+  openModalHTML(body);
+}
+async function startRun(budget,constrained){
+  closeModal();
+  const {ok,data}=await jpost("/api/run",{repo:REPO,task:PENDING.task,budget:budget,constrained:constrained,mode:"new"});
+  if(!ok||!data.ok){ const m=$("#msg"); if(m){m.textContent="Couldn't start: "+((data&&data.error)||"unknown");m.className="msg err";} return; }
+  tick();
+}
+async function resumeRun(add){
+  const b=(STATE&&STATE.budget_usd?STATE.budget_usd:CFG.default_budget)+ (add||0);
+  const {ok,data}=await jpost("/api/run",{repo:REPO,budget:b,mode:"resume"});
+  if(ok&&data.ok) tick();
 }
 
-async function openStep(id){
-  const dr=$("#drawer"); $("#d-title").textContent="Step "+id;
-  $("#d-body").innerHTML=`<div style="color:var(--mut);">Loading…</div>`; dr.classList.add("show");
-  let d; try{ d=await (await fetch(`/api/step?repo=${encodeURIComponent(REPO)}&id=${encodeURIComponent(id)}`)).json(); }
-  catch(e){ $("#d-body").innerHTML=`<div class="err">Failed to load.</div>`; return; }
-  if(!d.found){ $("#d-body").innerHTML=`<div style="color:var(--mut);">No detail recorded.</div>`; return; }
-  const st=d.step;
-  $("#d-title").innerHTML=`${esc(st.goal||st.id)} <span class="sbadge s-${st.status}" style="margin-left:8px;">${st.status}</span>`;
-  const sec=(lab,inner)=>`<div class="sec"><div class="lab">${lab}</div>${inner}</div>`;
-  const list=a=>a&&a.length?`<ul>${a.map(x=>`<li>${esc(x)}</li>`).join("")}</ul>`:`<div style="color:var(--mut2);">—</div>`;
-  let html="";
-  html+=sec("Overview",`<div style="color:var(--mut);font-size:13px;line-height:1.7;">
-     Attempts ${st.attempts} · Rejections ${st.rejections} · Cost ${money(st.cost_usd)}
-     ${st.commit_sha?` · commit <span class="mono">${esc(st.commit_sha.slice(0,9))}</span>`:``}
-     ${st.skip_reason?`<br>Descoped: ${esc(st.skip_reason)}`:``}</div>`);
-  if(st.details) html+=sec("Details",`<div style="color:var(--mut);">${esc(st.details)}</div>`);
-  html+=sec("Acceptance criteria",list(st.acceptance_criteria));
-  html+=sec("Verify commands",list(st.verify));
-  if(st.dev_summary) html+=sec("Developer summary",`<pre>${esc(st.dev_summary)}</pre>`);
-  html+=sec("Handover packet"+(d.handover_count>1?` · latest of ${d.handover_count}`:""),
-     d.handover?`<pre>${esc(d.handover)}</pre>`:`<div style="color:var(--mut2);">No handover recorded (step not yet reviewed).</div>`);
-  $("#d-body").innerHTML=html;
+/* ---------------- new project ---------------- */
+function openNew(){
+  const path=CFG.default_repo||"";
+  openModalHTML(`<h2>New project</h2><div class="lead">Point me at a folder — the current directory is the default.</div>
+    <label>Project folder</label><input id="np-path" value="${esc(path)}" placeholder="~/code/my-service">
+    <div class="msg">Cloning a repo? Use <span style="font-family:var(--mono)">loopd clone &lt;url&gt;</span> in the terminal for now.</div>
+    <div class="frow"><button class="primary" onclick="openNewGo()">Open</button><button class="ghost" onclick="closeModal()">Cancel</button></div>`);
 }
+function openNewGo(){const p=$("#np-path").value.trim(); if(!p)return; closeModal(); openProject(encodeURIComponent(p)); }
+
+/* ---------------- settings / modal plumbing ---------------- */
+function openSettings(){
+  openModalHTML(`<h2>Settings</h2><div class="lead">loopd reads defaults from your .env.</div>
+    <div class="fc">
+      <div class="row"><span class="k">Default budget</span><span class="v">${money(CFG.default_budget)}</span></div>
+      <div class="row"><span class="k">Dashboard</span><span class="v">local only</span></div>
+    </div>
+    <div class="frow">${REPO?`<button class="ghost" onclick="closeModal();showProjects()">&larr; All projects</button>`:""}
+      <button class="primary" onclick="closeModal()">Done</button></div>`);
+}
+function openModalHTML(html){$("#modal").innerHTML=html; $("#scrim").classList.add("show"); $("#modal").classList.add("show");}
+function closeModal(){$("#scrim").classList.remove("show"); $("#modal").classList.remove("show");}
+document.addEventListener("keydown",e=>{if(e.key==="Escape"){closeModal();closeDrawer();}});
+
 init();
 </script>
-</body></html>
+</body>
+</html>
 """
-
 
 if __name__ == "__main__":
     sys.exit(main())

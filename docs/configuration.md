@@ -52,13 +52,14 @@ Exit codes: `0` verified done · `1` stopped with a report (or declined at the f
 
 ## Dashboard
 
-`python3 dashboard.py` starts the local web UI to launch and watch runs
-([usage](usage.md#5-the-web-dashboard-browser-ui)).
+`loopd ui` starts Mission Control — the local web UI to launch and watch runs
+([usage](usage.md#5-mission-control--the-dashboard-loopd-ui)). (`python3 dashboard.py` is the
+equivalent low-level entry.)
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--repo <path>` | (none) | default target repo pre-filled in the launch form |
-| `--budget <usd>` | `BUDGET_USD` or 25 | default budget shown in the form |
+| `--repo <path>` | current dir | project opened on launch (picker if it's not a project yet) |
+| `--budget <usd>` | `BUDGET_USD` or 25 | default budget for the forecast/launch |
 | `--host` | `127.0.0.1` | bind host — keep it local |
 | `--port` | `8787` | port |
 

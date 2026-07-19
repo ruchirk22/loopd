@@ -8,6 +8,7 @@ import urllib.parse
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -59,6 +60,37 @@ class TestSnapshot(unittest.TestCase):
         s = dashboard.snapshot(Path(tempfile.mkdtemp()))
         self.assertFalse(s["exists"])
         self.assertEqual(s["timeline"], [])
+
+    def test_snapshot_carries_workspace_framing(self):
+        # even before a run, the Project screen's empty state gets the project's identity
+        s = dashboard.snapshot(Path(tempfile.mkdtemp()))
+        for k in ("name", "health", "memory_count", "forecast_accuracy", "runs"):
+            self.assertIn(k, s)
+        self.assertIn("is_repo", s["health"])
+
+    def test_snapshot_of_a_run_has_forecast_and_health_keys(self):
+        s = dashboard.snapshot(repo_with_run(), running=True)
+        for k in ("name", "health", "memory_count", "forecast_accuracy", "runs", "escalation"):
+            self.assertIn(k, s)
+
+
+class TestProjectsList(unittest.TestCase):
+    def setUp(self):
+        import os
+        self.home = Path(tempfile.mkdtemp())
+        self._p = mock.patch.dict(os.environ, {"LOOPD_HOME": str(self.home)})
+        self._p.start(); self.addCleanup(self._p.stop)
+
+    def test_projects_list_from_registry(self):
+        from orchestrator import workspace
+        repo = repo_with_run()
+        workspace.register(repo)
+        workspace.record_run(repo, 0, 3.25)
+        rows = dashboard._projects_list(dashboard.RunManager())
+        self.assertTrue(any(r["path"] == str(Path(repo).resolve()) for r in rows))
+        row = next(r for r in rows if r["path"] == str(Path(repo).resolve()))
+        self.assertIn(row["status"], ("idle", "paused", "done", "working"))
+        self.assertIn("health", row)
 
 
 class TestStepDetail(unittest.TestCase):
@@ -114,7 +146,7 @@ class TestHTTP(unittest.TestCase):
         code, body, _ = self._get("/")
         self.assertEqual(code, 200)
         self.assertIn(b"loopd", body)
-        self.assertIn(b"New run", body)
+        self.assertIn(b"New project", body)
 
     def test_asset_served(self):
         code, body, ctype = self._get("/assets/loopd.svg")

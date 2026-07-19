@@ -166,37 +166,41 @@ docker run --rm --env-file .env -v "$(pwd)/../my-app:/work" loopd --budget 25
 Running `python3 run.py` directly is fine for a throwaway directory you don't mind the agent
 editing. See [security.md](security.md) for the full sandbox model.
 
-## 5. The web dashboard (browser UI)
+## 5. Mission Control — the dashboard (`loopd ui`)
 
-Prefer a browser to the terminal? loopd ships a local dashboard that both **launches** runs
-(a task box that takes long tasks — your `@file` as a textarea) and **watches** them live.
+Prefer a browser? `loopd ui` is the CLI made visual — the same engineer, the same terms, the
+same calm. It opens on the current project (or a project picker if none is active) and
+answers one question at a glance: *how is my engineer doing?*
 
 ```bash
-python3 dashboard.py --repo ../my-app        # opens on http://127.0.0.1:8787
+loopd ui                    # opens http://127.0.0.1:8787 on the current project
+loopd ui --port 9000        # or a chosen port
 ```
 
-From the page you can:
+It's built from **three screens** (really two + a terminal state), so there's almost nothing
+to navigate:
 
-- **Start / resume / stop** — launch a new run (a task box that takes long tasks, your
-  `@file`), resume an interrupted one, or stop the active run (state is saved, so it stays
-  resumable) — all from the top bar.
-- **Estimate first** — in the New Run modal, click *Estimate first* to see the Execution
-  Forecast card (cost, runtime, steps, risk) before launching; a *Use $X* button applies the
-  recommended budget. Tick *Constrained mode* to have the planner prioritize critical work.
-  While a run is live and after it ends, the right column shows the forecast and, on
-  completion, the predicted-vs-actual comparison with a prediction-accuracy score.
-- **Watch it think** — a live status hero (elapsed, cost, retries, model, progress), an
-  execution graph highlighting the active phase (planner → developer → verification →
-  decision), the plan as step cards, a runtime timeline, the raw console, and the final
-  report when it lands.
-- **Inspect any step** — click a step card to open a drawer with its acceptance criteria,
-  verify commands, developer summary, and the full handover packet (real diff + gate
-  transcript).
+- **Projects** — the home. A calm grid of your projects with their status (working / paused /
+  done / idle), health, and track record. Click one to open it; *+ New project* to start.
+- **Project (Mission Control)** — the heart. A status **hero** answers "how's it going" in
+  three lines (state · current action · progress, with spend-vs-budget and the reassurance
+  *"I've got it from here"*), the **plan** shows as a calm checklist, and a quiet right rail
+  holds expandable **Forecast**, **Repository**, **Memory**, and **History** cards. Click any
+  step for a drawer with its goal, acceptance, verification, and the real diff. When loopd
+  needs a decision (a budget stop, later Failure Analysis) the *same screen* shifts to a calm
+  amber "paused — here's why, here's how I'd proceed" state; nothing turns red, nothing loads
+  a new page.
+- **Completion Report** — when a run finishes, the Project screen *settles* into a handover:
+  what was built, verification (every step + a clean-checkout replay), forecast-vs-actual with
+  an accuracy score, and what loopd learned. It reads like a senior engineer handing over work.
 
-It reads the same `.agentic/` files the CLI writes and refreshes about every 1.5s. It is a
-**local tool** — it binds to `127.0.0.1` and spawns `run.py`, so don't expose it to a
-network. Flags: `--repo`, `--budget`, `--host`, `--port` (see
-[configuration.md](configuration.md#dashboard)).
+Before a run starts, the **Execution Forecast** appears as a modal with the one budget
+decision (raise / keep-and-focus-on-core / not now) — the same choice the CLI offers.
+
+It's monochrome and quiet by design, reads the same `.agentic/` files the CLI writes,
+refreshes about every 1.5s, and is a **local tool** — it binds to `127.0.0.1` and spawns
+`run.py`, so don't expose it to a network. Flags: `--repo`, `--budget`, `--host`, `--port`
+(see [configuration.md](configuration.md#dashboard)). Ctrl-C in the terminal closes it.
 
 ## 6. Write a good brief (the highest-leverage thing you do)
 

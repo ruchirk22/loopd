@@ -149,7 +149,7 @@ docker run --rm --env-file .env -v "$(pwd)/../my-app:/work" loopd --budget 25
 ```
 
 Prefer a browser? `loopd ui` opens a local dashboard to launch and watch runs live (see
-[docs/usage.md](docs/usage.md#5-the-web-dashboard-browser-ui)).
+[docs/usage.md](docs/usage.md#5-mission-control--the-dashboard-loopd-ui)).
 
 ## How a run works
 
