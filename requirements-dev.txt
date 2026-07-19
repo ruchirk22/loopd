@@ -1,0 +1,9 @@
+# loopd has NO runtime Python dependencies — it is stdlib-only by design and drives the
+# Claude Code CLI (`claude`) plus, optionally, the GitHub CLI (`gh`), which you install
+# separately (they are not pip packages). So there is intentionally no requirements.txt.
+#
+# This file pins only the toolchain needed to BUILD and PUBLISH loopd to PyPI:
+#     python -m venv .venv && source .venv/bin/activate
+#     pip install -r requirements-dev.txt      # (or: pip install -e '.[dev]')
+build>=1.2
+twine>=5.1
