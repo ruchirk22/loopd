@@ -25,20 +25,20 @@ WORKDIR /app
 
 # Git identity + trust for the mounted work repo (the ledger also sets repo-local
 # identity as a fallback, but the mount's ownership needs marking safe up front).
-RUN git config --global user.name "agentic-loop" \
-    && git config --global user.email "agentic-loop@container" \
+RUN git config --global user.name "loopd" \
+    && git config --global user.email "loopd@container" \
     && git config --global --add safe.directory /work
 
+# The package is self-contained: prompts and assets live under orchestrator/, so copying
+# the package is enough — the loop runs as `python -m orchestrator.run`.
 COPY --chown=agent:agent orchestrator ./orchestrator
-COPY --chown=agent:agent prompts ./prompts
-COPY --chown=agent:agent run.py ./run.py
 
 ENV DEV_PERMISSION_MODE=bypassPermissions
 
 # Mount your target repo at /work and pass ANTHROPIC_API_KEY at runtime (never bake it in):
-#   docker build -t agentic-loop .
+#   docker build -t loopd .
 #   docker run --rm -e ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY \
-#     -v "$(pwd)/target-repo:/work" agentic-loop \
+#     -v "$(pwd)/target-repo:/work" loopd \
 #     "Add a /health endpoint returning {status:ok} with a passing test"
 # The mounted repo must be writable by uid 1001 (user `agent`), e.g. `chmod -R a+rw`.
-ENTRYPOINT ["python3", "run.py", "--repo", "/work"]
+ENTRYPOINT ["python3", "-m", "orchestrator.run", "--repo", "/work"]
