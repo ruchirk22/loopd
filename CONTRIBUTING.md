@@ -17,6 +17,8 @@ These are the load-bearing ideas; PRs that break them will be hard to accept:
   If you think you need a dependency, open an issue first.
 - **Reuse existing auth.** loopd never stores tokens — it rides Claude Code (`claude`) and,
   optionally, the GitHub CLI (`gh`). Don't add credential handling.
+- **Stay on-brand for any UI.** The CLI and dashboard share one calm, monochrome system —
+  see [docs/brand.md](docs/brand.md) before changing copy, color, or layout.
 
 ## Getting set up
 

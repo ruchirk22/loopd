@@ -602,7 +602,7 @@ PAGE = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>loopd</title>
-<link rel="icon" href="/assets/loopd_no_bg.png">
+<link rel="icon" href="/assets/loopd.svg">
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
 :root{
@@ -637,7 +637,7 @@ textarea{resize:vertical;min-height:92px;line-height:1.6;}
 .top{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:14px;height:56px;padding:0 22px;
   background:rgba(11,11,12,.82);backdrop-filter:blur(14px);border-bottom:1px solid var(--line);}
 .brand{display:flex;align-items:center;gap:10px;cursor:pointer;}
-.logo{height:20px;filter:grayscale(1) brightness(1.7) contrast(.82);opacity:.94;}
+.logo{height:26px;filter:grayscale(1) brightness(1.7) contrast(.82);opacity:.94;}
 .crumb{color:var(--mut);font-size:13px;display:flex;align-items:center;gap:8px;}
 .crumb b{color:var(--fg);font-weight:560;}
 .crumb .sep{color:var(--faint);}
@@ -863,7 +863,7 @@ async function renderProjects(){
     <div style="font-size:12px;color:var(--faint)">folder &middot; repo &middot; an idea</div></div>`;
   let body;
   if(!projs.length){
-    body=`<div class="center"><div class="big">Nothing running. All quiet.</div>
+    body=`<div class="center"><div class="big">What would you like to build today?</div>
       <button class="primary" onclick="openNew()">&nbsp;+&nbsp; Start your first project &nbsp;</button>
       <div style="margin-top:18px;color:var(--faint);font-size:12.5px">open a folder &middot; clone a repo &middot; describe an idea</div></div>`;
   }else{
@@ -967,7 +967,7 @@ function viewEmpty(s){
   return `<div class="cols"><div>
     <div class="hero">
       <div class="state"><span>Ready when you are.</span></div>
-      <div class="headline sm">What do you want built?</div>
+      <div class="headline sm">What would you like to build today?</div>
       <textarea id="obj" placeholder="Describe the objective — the definition of done, any constraints…"></textarea>
       <div class="actions"><button class="primary" onclick="delegate()">Delegate &rarr;</button>
         <span style="color:var(--faint);font-size:12px">or drop a spec, or paste an issue link</span></div>
@@ -981,7 +981,7 @@ function viewActive(s){
   const c=s.counts||{done:0,skipped:0,total:0};
   const pct=c.total?Math.round(100*(c.done+c.skipped)/c.total):0;
   const cur=s.current_step; const node=nodeLabel(s.active_node);
-  const head=cur?esc(cur.goal):(s.plan_summary?esc(s.plan_summary):"Getting started");
+  const head=cur?esc(cur.goal):(s.plan_summary?esc(s.plan_summary):"Starting your engineer…");
   const f=s.forecast||{}; const budget=(f.chosen_budget_usd||s.budget_usd||0);
   const spentPct=budget?Math.min(100,100*(s.total_cost_usd/budget)):0;
   const fmark=(budget&&f.estimated_cost_usd)?Math.min(100,100*(f.estimated_cost_usd/budget)):null;
@@ -1094,7 +1094,8 @@ function viewReport(s){
   return `<div class="screen">
     <div class="hero done">
       <div class="state"><span>&#10003; Delivered</span><span>${dur(s.elapsed_s)} &middot; ${money(s.total_cost_usd)}</span></div>
-      <div class="headline">Done${task?" — "+esc(task):""}</div>
+      <div class="headline">Your engineer finished the work.</div>
+      <div class="sub">${task?esc(task):"See the summary below."}</div>
       <div class="verified">&#10003; every step's checks &nbsp;&nbsp; &#10003; full replay in a clean checkout</div>
     </div>
     ${vt}
