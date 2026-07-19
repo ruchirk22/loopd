@@ -31,6 +31,7 @@ ASSETS = REPO_ROOT / "assets"
 sys.path.insert(0, str(REPO_ROOT))
 from orchestrator.env import load_dotenv  # noqa: E402
 from orchestrator import workspace  # noqa: E402
+from orchestrator import github  # noqa: E402
 
 
 # ---------------------------------------------------------------- data
@@ -315,6 +316,9 @@ def compute_forecast(repo, task, budget) -> dict:
     try:
         repo = Path(repo).expanduser().resolve()
         brief = (task or "").strip()
+        if brief and github.parse_issue_ref(brief):   # an issue link → estimate from the issue
+            iss = github.fetch_issue(repo, brief)
+            brief = github.issue_to_brief(iss) if iss else ""
         if not brief:
             bf = repo / ".agentic" / "brief.md"
             brief = bf.read_text(errors="replace") if bf.is_file() else ""
@@ -430,6 +434,36 @@ def _projects_list(manager) -> list:
     return out
 
 
+def _github_info(repo) -> dict:
+    """Lightweight enrichment for the Repository card — repo slug + this branch's PR, if any."""
+    av = github.available()
+    if not av["ok"]:
+        return {"available": False, "hint": av.get("hint", "")}
+    branch = github.current_branch(repo)
+    return {"available": True, "repo": github.repo_meta(repo), "branch": branch,
+            "pr": github.pr_status(repo, branch) if branch else None}
+
+
+def _open_pr_api(repo) -> dict:
+    from orchestrator.config import Config
+    from orchestrator import memory
+    av = github.available()
+    if not av["ok"]:
+        return {"ok": False, "error": av.get("hint", "GitHub isn't connected")}
+    if not github.has_remote(repo):
+        return {"ok": False, "error": "this project has no git remote"}
+    try:
+        decisions = memory.load(repo).get(memory.DECISIONS, [])[-6:]
+    except Exception:
+        decisions = []
+    payload = github.assemble_pr(repo, decisions=decisions)
+    if not payload:
+        return {"ok": False, "error": "no completed run to open a PR from"}
+    cfg = Config(repo=repo)
+    return github.open_pr(repo, payload["branch"], cfg.github_pr_base or payload["base"],
+                          payload["title"], payload["body"], draft=cfg.github_pr_draft)
+
+
 def _make_handler(manager: RunManager, default_repo: str, default_budget: float):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):
@@ -484,6 +518,8 @@ def _make_handler(manager: RunManager, default_repo: str, default_budget: float)
                 self._json({"memory": p.read_text(errors="replace") if p.is_file() else ""})
             elif u.path == "/api/step":
                 self._json(step_detail(repo, (q.get("id", [""]) or [""])[0]))
+            elif u.path == "/api/github":
+                self._json(_github_info(repo))
             else:
                 self._json({"error": "not found"}, 404)
 
@@ -500,8 +536,16 @@ def _make_handler(manager: RunManager, default_repo: str, default_budget: float)
                 self._json({"ok": False, "error": "repo is required"}, 400)
                 return
             if u.path == "/api/run":
+                task = body.get("task", "")
+                if body.get("mode", "new") == "new" and github.parse_issue_ref((task or "").strip()):
+                    iss = github.fetch_issue(repo, task.strip())
+                    if not iss:
+                        self._json({"ok": False, "error": "couldn't read that issue"}, 409)
+                        return
+                    github.write_issue_context(repo, iss)  # brief.md drives the run
+                    task = ""
                 result = manager.launch(
-                    repo=repo, task=body.get("task", ""),
+                    repo=repo, task=task,
                     budget=body.get("budget", default_budget),
                     pm_model=(body.get("pm_model") or "").strip(),
                     dev_model=(body.get("dev_model") or "").strip(),
@@ -512,6 +556,8 @@ def _make_handler(manager: RunManager, default_repo: str, default_budget: float)
             elif u.path == "/api/forecast":
                 self._json(compute_forecast(repo, body.get("task", ""),
                                             body.get("budget", default_budget)))
+            elif u.path == "/api/pr":
+                self._json(_open_pr_api(repo))
             elif u.path == "/api/stop":
                 result = manager.stop(repo)
                 self._json(result, 200 if result.get("ok") else 409)
@@ -895,7 +941,18 @@ function forecastBody(s){const f=s.forecast||{}; if(f.estimated_cost_usd==null)r
 function repoBody(s){const h=s.health||{}; if(!h.is_repo)return "A fresh folder — I'll set up git when we start.";
   return `<div class="kv"><span class="k">branch</span><span class="v">${esc(h.branch||"?")}</span></div>
     <div class="kv"><span class="k">status</span><span class="v">${h.dirty?h.dirty_count+" uncommitted":"clean"}</span></div>
-    <div class="kv"><span class="k">pull request</span><span class="v" style="color:var(--faint)">with GitHub soon</span></div>`;}
+    <div id="ghinfo" style="margin-top:8px"><span class="expand" onclick="loadGithub()">check GitHub &rarr;</span></div>`;}
+async function loadGithub(){const el=$("#ghinfo"); if(!el)return; el.innerHTML='<span class="fc-note">checking…</span>';
+  const g=await jget("/api/github?repo="+encodeURIComponent(REPO));
+  if(!g||!g.available){ el.innerHTML=`<span class="fc-note">${esc((g&&g.hint)||"GitHub not connected")}</span>`; return; }
+  const slug=g.repo?g.repo.slug:"—";
+  const pr=g.pr?`<div class="kv"><span class="k">pull request</span><span class="v"><a href="${esc(g.pr.url)}" target="_blank">#${g.pr.number} ${esc(g.pr.state.toLowerCase())}</a></span></div>`
+    :`<div class="fc-note">no open PR for this branch</div>`;
+  el.innerHTML=`<div class="kv"><span class="k">repo</span><span class="v">${esc(slug)}</span></div>${pr}`;}
+async function openPr(){const el=$("#prinfo"); if(el)el.textContent="Opening…";
+  const {data}=await jpost("/api/pr",{repo:REPO});
+  if(data&&data.ok){ if(el)el.innerHTML=(data.existing?"Already open: ":"Opened: ")+`<a href="${esc(data.url)}" target="_blank">${esc(data.url)}</a>`; }
+  else if(el){ el.textContent="Couldn't open PR — "+((data&&data.error)||"unknown"); }}
 function memoryBody(s){ if(!s.has_memory)return "I'll note durable facts about this project as I learn them.";
   return `<span class="expand" onclick="loadMemory()">view what I've learned &rarr;</span><div id="memdump"></div>`;}
 function historyBody(s,acc){ return `<div class="kv"><span class="k">runs</span><span class="v">${s.runs||0}</span></div>
@@ -1022,8 +1079,9 @@ function viewReport(s){
       ${acc!=null?`<div class="va"><span class="k">accuracy</span><span class="v">${acc}%</span></div>`:""}
     </div>
     <div class="card"><h3>Pull request</h3>
-      <div style="color:var(--mut);font-size:13px">Branch <span style="font-family:var(--mono);color:var(--fg)">${esc(s.branch||"")}</span> is ready.</div>
-      <div style="color:var(--faint);font-size:12.5px;margin-top:10px">I'll open the PR here once GitHub integration lands.</div>
+      <div style="color:var(--mut);font-size:13px">Branch <span style="font-family:var(--mono);color:var(--fg)">${esc(s.branch||"")}</span> is ready to review.</div>
+      <div class="actions" style="margin-top:12px"><button class="primary" onclick="openPr()">Open pull request</button></div>
+      <div id="prinfo" class="fc-note" style="margin-top:10px"></div>
     </div>
     <div class="card"><h3>What I learned</h3>
       ${s.has_memory?`<div style="color:var(--good);font-size:12.5px">&#43; saved ${s.memory_count} note(s) to project memory</div>

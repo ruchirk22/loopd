@@ -77,6 +77,12 @@ class Config:
     forecast_max_turns: int = field(default_factory=lambda: int(_env("FORECAST_MAX_TURNS", "6")))
     # Estimator coefficients live in forecast.EstimatorConfig (env: FORECAST_*), not here.
 
+    # --- GitHub (an enhancement via the `gh` CLI; loopd never handles tokens) ---
+    github_enabled: bool = field(default_factory=lambda: _env("GITHUB_ENABLED", "1") not in ("0", "false", ""))
+    github_auto_pr: bool = field(default_factory=lambda: _env("GITHUB_AUTO_PR", "0") not in ("0", "false", ""))
+    github_pr_base: str = field(default_factory=lambda: _env("GITHUB_PR_BASE", ""))  # "" = repo default branch
+    github_pr_draft: bool = field(default_factory=lambda: _env("GITHUB_PR_DRAFT", "0") not in ("0", "false", ""))
+
     # --- Per-run inputs (set by run.py, not env) ---
     brief_path: Optional[Path] = None          # --brief: existing handover brief
     seed_session: Optional[str] = None         # --seed-session: fork an interactive session

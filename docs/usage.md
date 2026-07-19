@@ -355,6 +355,33 @@ Full probe list and options: [configuration.md](configuration.md#verification-pr
   brief or a missing dependency in the target repo.
 - **Model not available** → pick a model your account/plan supports via `PM_MODEL`/`DEV_MODEL`.
 
+## GitHub (optional)
+
+GitHub is an **enhancement, never a dependency** — loopd works completely without it, and it
+never handles, stores, or asks for GitHub tokens. It reuses your
+[`gh` CLI](https://cli.github.com) login:
+
+```bash
+gh auth login        # once — the credential lives in your OS keychain, not in loopd
+```
+
+If `gh` isn't installed or signed in, every GitHub touchpoint degrades to a friendly hint
+with the exact command to enable it, and the run carries on.
+
+- **Build from an issue:** `loopd #142` (or paste the issue URL). loopd reads the issue with
+  `gh` and uses its title/body as the objective, then links the eventual PR back to it.
+- **Open a pull request:** after a run **succeeds**, loopd offers a PR — always with one
+  confirmation (never automatic). `--pr` or `GITHUB_AUTO_PR=1` skip the prompt; `loopd pr`
+  opens one any time. The description reads like a senior engineer's handover: what was built,
+  verification (every step + a clean-checkout replay), forecast-vs-actual, `Closes #142`, and
+  notable decisions.
+- **In the dashboard:** the Repository card shows the repo and any open PR; the Completion
+  Report has an *Open pull request* button. These stay lightweight — they surface GitHub, they
+  don't try to manage it.
+
+Knobs: `GITHUB_ENABLED`, `GITHUB_AUTO_PR`, `GITHUB_PR_BASE`, `GITHUB_PR_DRAFT`
+([configuration](configuration.md#github-optional--via-the-gh-cli)).
+
 ## See also
 
 - [configuration.md](configuration.md) — every flag, env var, and seeding mode.

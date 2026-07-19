@@ -102,6 +102,18 @@ run appends a predicted-vs-actual record to `.agentic/forecasts.jsonl`, and the 
 the resulting calibration factor back in so its numbers get truer over time. See
 [usage](usage.md#3-the-execution-forecast) and `orchestrator/forecast.py`.
 
+### GitHub (optional — via the `gh` CLI)
+| Variable | Default | Meaning |
+|---|---|---|
+| `GITHUB_ENABLED` | `1` | offer GitHub features when `gh` is authenticated; `0` disables them |
+| `GITHUB_AUTO_PR` | `0` | open the PR after a successful run without asking (power-user opt-in) |
+| `GITHUB_PR_BASE` | (repo default branch) | base branch for opened PRs |
+| `GITHUB_PR_DRAFT` | `0` | open PRs as drafts |
+
+loopd never stores or requests GitHub tokens — it reuses your `gh auth login`. GitHub is an
+enhancement, not a dependency; when `gh` is missing/unauthenticated every touchpoint degrades
+to a friendly hint. See [usage](usage.md#github-optional).
+
 ### Context, handover, timeouts
 | Variable | Default |
 |---|---|

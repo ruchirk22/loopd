@@ -38,7 +38,8 @@ alias loopd="python3 /path/to/loopd/loopd"     # add to ~/.zshrc / ~/.bashrc
 | `loopd new "<idea>"` | Start a brand-new project from scratch in the current folder (sets up git). |
 | `loopd clone <url> ["<task>"]` | Clone a repo, then optionally start building in it. |
 | `loopd resume` | Continue the paused run. If loopd stopped with a blocker, it shows the diagnosis and lets you pick one option (`--yes` for the recommended, `--option <id>` for a specific one). |
-| `loopd <github-issue>` | *(coming with GitHub Integration)* build straight from an issue. |
+| `loopd #142` | Build straight from a GitHub issue (or paste the issue URL). Uses your `gh` login. |
+| `loopd pr` | Open a pull request for the last run — a written handover, linked to the issue. |
 
 ## Look in (all read-only, all optional)
 
@@ -73,6 +74,18 @@ alias loopd="python3 /path/to/loopd/loopd"     # add to ~/.zshrc / ~/.bashrc
 | `--final-verify "<cmd>"` | Add a whole-project check to final verification (repeatable). |
 | `--repo <path>` | Work in another repo instead of the current directory (for scripts/CI). |
 | `-q`, `--quiet` | Less chatter (drops the reassurance banner). |
+| `--pr` | Open a pull request after a successful run (no prompt). |
+| `--no-pr` | Never offer a pull request for this run. |
+
+## GitHub (optional)
+
+GitHub is an enhancement, never a dependency — everything works without it. loopd never
+handles tokens; it reuses your [`gh` CLI](https://cli.github.com) login (`gh auth login`,
+once). If `gh` isn't installed or authenticated, loopd says so with the exact command to fix
+it and carries on. `loopd #142` builds from an issue; after a successful run loopd offers a
+PR (always with one confirmation — `--pr` / `GITHUB_AUTO_PR=1` opt in for no prompt), or run
+`loopd pr` any time. The PR body is a senior-engineer handover (what was built, verification
++ clean-checkout replay, forecast-vs-actual, `Closes #142`, notable decisions).
 
 ## `loopd ui` flags
 

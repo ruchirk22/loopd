@@ -118,6 +118,29 @@ class TestStepDetail(unittest.TestCase):
 
 
 class TestBuildCommand(unittest.TestCase):
+    def test_github_info_and_pr_helpers(self):
+        from orchestrator import github
+        with mock.patch.object(github, "available", lambda: {"ok": True}), \
+             mock.patch.object(github, "current_branch", lambda repo: "b"), \
+             mock.patch.object(github, "repo_meta", lambda repo: {"slug": "o/r", "default_branch": "main"}), \
+             mock.patch.object(github, "pr_status", lambda repo, br: None):
+            info = dashboard._github_info("/tmp/x")
+        self.assertTrue(info["available"])
+        self.assertEqual(info["repo"]["slug"], "o/r")
+
+    def test_github_info_degrades(self):
+        from orchestrator import github
+        with mock.patch.object(github, "available", lambda: {"ok": False, "hint": "gh auth login"}):
+            info = dashboard._github_info("/tmp/x")
+        self.assertFalse(info["available"])
+        self.assertIn("gh auth login", info["hint"])
+
+    def test_open_pr_api_needs_github(self):
+        from orchestrator import github
+        with mock.patch.object(github, "available", lambda: {"ok": False, "hint": "install gh"}):
+            r = dashboard._open_pr_api("/tmp/x")
+        self.assertFalse(r["ok"])
+
     def test_resume_carries_failure_analysis_option(self):
         cmd = dashboard.build_run_command("/tmp/x", 8, "resume", option="add-redis-fixture")
         self.assertIn("--option", cmd)

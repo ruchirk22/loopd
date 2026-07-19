@@ -19,6 +19,7 @@ rules neither agent can override.
 | `orchestrator/seed.py` | Turns `/handoff`, `--brief`, `--seed-session`, or a task string into `.agentic/brief.md`. |
 | `orchestrator/forecast.py` | Execution Forecast: one cheap model call sizes the work; a deterministic, calibrated estimator turns it into predicted cost/runtime/steps and a recommended budget. Learns from `.agentic/forecasts.jsonl`. |
 | `orchestrator/analysis.py` | Failure Analysis: turns a stop into a grounded explanation (summary, root cause, ranked options, recommendation) from the PM's abort directive, or a deterministic fallback. Persisted to `.agentic/analysis.json`; rendered identically by CLI and dashboard. |
+| `orchestrator/github.py` | Optional GitHub enhancement via the `gh` CLI (never handles tokens): issues in (`gh issue view` → brief), PRs out (`gh pr create` with a handover body). Called only from the CLI/dashboard surface — the engine stays GitHub-agnostic. |
 | `orchestrator/loop.py` | The control plane that ties it together and enforces every rule. |
 | `orchestrator/memory.py` | Engineering memory: `.agentic/memory.md` the planner reads each run and updates at the end. |
 | `orchestrator/dashboard.py` | Optional local web UI (stdlib `http.server`) to launch and watch runs; reads the same `.agentic/` files. |

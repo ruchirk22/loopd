@@ -107,12 +107,6 @@ class TestRouting(CliTestBase):
         _, out, _ = self.run_cli(["build a thing", "--quiet"])
         self.assertNotIn("I've got it from here", out)
 
-    def test_issue_is_deferred_gracefully(self):
-        rc, out, fake = self.run_cli(["#142"])
-        self.assertEqual(rc, 2)
-        self.assertIn("GitHub", out)
-        self.assertEqual(fake.calls, [])  # nothing built
-
     def test_spec_file_becomes_brief(self):
         spec = self.repo / "spec.md"
         spec.write_text("# build the thing\n")
@@ -194,6 +188,52 @@ class TestAmbient(CliTestBase):
         self.assertIsNotNone(rc)
         self.assertEqual(rc["kind"], "loopd_fix")
         self.assertEqual(rc["step"], "6")
+
+    def test_issue_builds_from_issue(self):
+        from orchestrator import github
+        issue = {"number": 142, "title": "Reset link 404s", "body": "fix it", "url": "u", "labels": []}
+        with mock.patch.object(github, "available", lambda: {"ok": True}), \
+             mock.patch.object(github, "fetch_issue", lambda repo, ref: issue), \
+             mock.patch.object(github, "available", lambda: {"ok": True}):
+            _, out, fake = self.run_cli(["#142"])
+        self.assertIn("Building from issue", out)
+        self.assertEqual(len(fake.calls), 1)                       # the run started
+        self.assertIsNone(fake.calls[0]["task"])                   # the issue brief drives it
+        self.assertTrue((self.repo / ".agentic" / "brief.md").is_file())
+
+    def test_issue_without_github_degrades(self):
+        from orchestrator import github
+        with mock.patch.object(github, "available", lambda: {"ok": False, "hint": "run gh auth login"}):
+            rc, out, fake = self.run_cli(["#142"])
+        self.assertEqual(rc, 2)
+        self.assertIn("gh auth login", out)
+        self.assertEqual(fake.calls, [])                           # nothing ran
+
+    def test_pr_offer_with_flag_opens_pr(self):
+        from orchestrator import github
+        opened = {}
+        with mock.patch.object(github, "available", lambda: {"ok": True}), \
+             mock.patch.object(github, "has_remote", lambda repo: True), \
+             mock.patch.object(github, "assemble_pr", lambda repo, decisions=None: {"branch": "b", "base": "main", "title": "t", "body": "x"}), \
+             mock.patch.object(github, "open_pr", lambda *a, **k: opened.update(done=True) or {"ok": True, "url": "https://pr/1"}):
+            _, out, _ = self.run_cli(["build a thing", "--pr"])
+        self.assertTrue(opened.get("done"))
+        self.assertIn("https://pr/1", out)
+
+    def test_no_pr_flag_suppresses_offer(self):
+        from orchestrator import github
+        called = {"n": 0}
+        with mock.patch.object(github, "available", lambda: called.update(n=called["n"] + 1) or {"ok": True}), \
+             mock.patch.object(github, "has_remote", lambda repo: True):
+            self.run_cli(["build a thing", "--no-pr"])
+        self.assertEqual(called["n"], 0)   # never even checked
+
+    def test_cmd_pr_without_github(self):
+        from orchestrator import github
+        with mock.patch.object(github, "available", lambda: {"ok": False, "hint": "install gh"}):
+            rc, out, _ = self.run_cli(["pr"])
+        self.assertEqual(rc, 2)
+        self.assertIn("install gh", out)
 
     def test_ui_launches_dashboard(self):
         served = {}

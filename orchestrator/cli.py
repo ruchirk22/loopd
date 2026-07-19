@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-from . import analysis, loop, workspace
+from . import analysis, github, loop, workspace
 from . import forecast as _forecast
 from .config import Config
 from .env import load_dotenv
@@ -27,7 +27,7 @@ __version__ = "0.1.0"
 
 SUBCOMMANDS = {
     "ui", "status", "plan", "logs", "report", "memory", "projects", "history",
-    "resume", "new", "clone", "config", "help", "version",
+    "resume", "new", "clone", "pr", "config", "help", "version",
 }
 
 # --------------------------------------------------------------- voice
@@ -102,6 +102,8 @@ def _add_run_flags(p: argparse.ArgumentParser) -> None:
                    help="show the estimate and exit without building")
     p.add_argument("--json", action="store_true", help="machine-readable output where applicable")
     p.add_argument("-q", "--quiet", action="store_true", dest="quiet", help="less chatter")
+    p.add_argument("--pr", action="store_true", help="open a pull request after a successful run")
+    p.add_argument("--no-pr", action="store_true", dest="no_pr", help="don't offer a pull request")
 
 
 def _build_cfg(repo, args) -> Config:
@@ -181,22 +183,29 @@ def cmd_run(argv: List[str]) -> int:
     repo = Path(args.repo).expanduser().resolve() if args.repo else Path.cwd()
     task: Optional[str] = None
     head = words[0] if words else None
+    from_issue = False
 
     if head is not None:
         if _is_issue(head):
-            return _github_soon()
-        if _is_repo_url(head):
+            if not _resolve_issue(repo, head):   # fetches the issue → writes the brief
+                return 2
+            from_issue = True
+        elif _is_repo_url(head):
             return cmd_clone([head] + words[1:] + _passthrough(args))
-        maybe = Path(head).expanduser()
-        if len(words) == 1 and maybe.is_file():
-            args.brief = str(maybe)          # a spec file drives the run
         else:
-            task = " ".join(words)
+            maybe = Path(head).expanduser()
+            if len(words) == 1 and maybe.is_file():
+                args.brief = str(maybe)          # a spec file drives the run
+            else:
+                task = " ".join(words)
 
-    if task is None and not args.brief and not args.seed_session and not args.resume:
+    if (task is None and not args.brief and not args.seed_session and not args.resume
+            and not from_issue):
         return cmd_home([])                  # nothing to build → the workspace home
 
     cfg = _build_cfg(repo, args)
+    if from_issue and not cfg.brief_path:
+        cfg.brief_path = cfg.state_dir / "brief.md"   # the issue brief drives the run
     workspace.register(repo)
     _open_line(repo)
 
@@ -207,7 +216,80 @@ def cmd_run(argv: List[str]) -> int:
     code = loop.run(task, cfg, resume=args.resume, fresh=args.fresh,
                     on_start=(_reassure if reassure else None))
     _close_line(repo, code)
+    if code == 0:
+        _offer_pr(repo, cfg, args)
     return code
+
+
+# --------------------------------------------------------------- GitHub (surface only)
+
+def _resolve_issue(repo, ref: str) -> bool:
+    av = github.available()
+    if not av["ok"]:
+        say(_warn("  GitHub isn't connected yet.") + _dim("  " + av["hint"]))
+        return False
+    issue = github.fetch_issue(repo, ref)
+    if not issue:
+        say(_warn("  I couldn't read that issue.") + _dim(" Check the number/URL and your access."))
+        return False
+    github.write_issue_context(repo, issue)
+    say(_dim("Building from issue ") + _b(f"#{issue['number']}") + _dim(" — ") + issue["title"])
+    return True
+
+
+def _recent_decisions(repo) -> List[str]:
+    from . import memory
+    try:
+        return memory.load(repo).get(memory.DECISIONS, [])[-6:]
+    except Exception:
+        return []
+
+
+def _offer_pr(repo, cfg: Config, args) -> None:
+    """After a successful run, offer a PR — never automatic, always one confirmation
+    (unless --pr / GITHUB_AUTO_PR explicitly opts in)."""
+    if getattr(args, "no_pr", False) or not cfg.github_enabled:
+        return
+    if not github.available()["ok"] or not github.has_remote(repo):
+        return
+    auto = getattr(args, "pr", False) or cfg.github_auto_pr
+    if not auto:
+        if not sys.stdin.isatty():
+            say(_dim("  Open a PR when you're ready with ") + "`loopd pr`" + _dim("."))
+            return
+        ans = _prompt("  Open a pull request? [Y/n] > ")
+        if ans is not None and ans.strip().lower() in ("n", "no"):
+            return
+    _open_pr(repo, cfg)
+
+
+def _open_pr(repo, cfg: Config) -> None:
+    payload = github.assemble_pr(repo, decisions=_recent_decisions(repo))
+    if not payload:
+        say(_dim("  There's no completed run here to open a PR from."))
+        return
+    say(_dim("  Opening a pull request…"))
+    r = github.open_pr(repo, payload["branch"], cfg.github_pr_base or payload["base"],
+                       payload["title"], payload["body"], draft=cfg.github_pr_draft)
+    if r.get("ok"):
+        say(_ok("  ✓ ") + ("PR already open: " if r.get("existing") else "Pull request opened: ")
+            + r["url"])
+    else:
+        say(_warn("  Couldn't open the PR: ") + _dim(r.get("error", "")))
+
+
+def cmd_pr(argv: List[str]) -> int:
+    repo = _repo_arg(argv)
+    cfg = Config(repo=repo)
+    av = github.available()
+    if not av["ok"]:
+        say(_warn("  GitHub isn't connected.") + _dim("  " + av["hint"]))
+        return 2
+    if not github.has_remote(repo):
+        say(_dim("  This project has no git remote to open a pull request against."))
+        return 2
+    _open_pr(repo, cfg)
+    return 0
 
 
 def _passthrough(args) -> List[str]:
@@ -241,12 +323,6 @@ def _forecast_only_flow(task, cfg: Config, as_json: bool) -> int:
         return 2
     say(_json.dumps(fc.to_dict(), indent=2) if as_json else _forecast.render_card(fc))
     return 0
-
-
-def _github_soon() -> int:
-    say(_warn("GitHub integration is on the way") + " — soon I'll build straight from an issue.")
-    say(_dim("For now: ") + 'loopd "<what to build>"' + _dim("  or  ") + "loopd path/to/spec.md")
-    return 2
 
 
 # --------------------------------------------------------------- workspace home & picker
@@ -585,7 +661,9 @@ def cmd_help(argv: Optional[List[str]] = None) -> int:
     say('  loopd path/to/spec.md          ' + _dim("build from a markdown spec"))
     say("  loopd new \"<idea>\"             " + _dim("start a brand-new project from scratch"))
     say("  loopd clone <url> [\"<task>\"]   " + _dim("clone a repo and (optionally) start building"))
+    say('  loopd #142                     ' + _dim("build straight from a GitHub issue"))
     say("  loopd resume                   " + _dim("continue the paused run in this project"))
+    say("  loopd pr                       " + _dim("open a pull request for the last run"))
     say()
     say(_b("  Look in"))
     say("  loopd                          " + _dim("the workspace home for this project"))
@@ -645,7 +723,7 @@ DISPATCH = {
     "ui": cmd_ui, "status": cmd_status, "plan": cmd_plan, "logs": cmd_logs,
     "report": cmd_report, "memory": cmd_memory, "projects": cmd_projects,
     "history": cmd_projects, "resume": cmd_resume, "new": cmd_new, "clone": cmd_clone,
-    "config": cmd_config,
+    "pr": cmd_pr, "config": cmd_config,
 }
 
 

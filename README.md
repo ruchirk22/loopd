@@ -91,6 +91,9 @@ Execution Forecast  →  cost/runtime/steps estimate  →  raise budget · run c
 - **Failure Analysis** — when loopd genuinely can't finish, it explains the blocker like a
   senior engineer (what happened · why · what it'd do · other options) and continues from
   your one-click choice, in the CLI or the dashboard.
+- **GitHub, if you want it** — build straight from an issue (`loopd #142`) and open a pull
+  request with a written handover when a run succeeds (`loopd pr`). Uses your existing `gh`
+  CLI login — loopd never touches your tokens — and is entirely optional.
 - **Engineering memory** — a structured `.agentic/memory.md` (architecture decisions, past
   failures, TODOs) the planner reads every run and updates automatically.
 - Deterministic gates the model can't bypass, plus built-in probes for real-world checks
