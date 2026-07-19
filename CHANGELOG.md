@@ -4,6 +4,17 @@ All notable changes to loopd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and loopd uses
 [semantic versioning](https://semver.org/).
 
+## [0.1.2] — 2026-07-19
+
+### Fixed
+- Dashboard: eliminated the periodic full-panel re-render that made the screen flicker every
+  poll. The panel now re-renders only on real changes (step/phase/status); the elapsed and
+  cost fields update in place, and a finished run's elapsed is frozen at its true duration.
+
+### Changed
+- Dashboard: larger, more legible type and components throughout, and a bigger full-color
+  header logo.
+
 ## [0.1.1] — 2026-07-19
 
 A polish release: documentation, packaging, and repository quality. No runtime behavior
@@ -49,5 +60,6 @@ only ships changes it can prove.
   terminal outcome.
 - **pip packaging** — `pip install loopd`; stdlib-only, no dependencies.
 
+[0.1.2]: https://github.com/ruchirk22/loopd/releases/tag/v0.1.2
 [0.1.1]: https://github.com/ruchirk22/loopd/releases/tag/v0.1.1
 [0.1.0]: https://github.com/ruchirk22/loopd/releases/tag/v0.1.0

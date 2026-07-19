@@ -56,6 +56,23 @@ class TestSnapshot(unittest.TestCase):
         self.assertIn(s["active_node"], ("planner", "developer", "verification", "review", "decision", "done"))
         self.assertTrue(any("accepted" in ev["text"] for ev in s["timeline"]))
 
+    def test_snapshot_freezes_elapsed_when_finished(self):
+        # A finished run must report a frozen elapsed (end - start), not an ever-growing clock,
+        # so the "Delivered" card is stable and reopening an old run shows the true duration.
+        repo = repo_with_run()
+        sp = repo / ".agentic" / "state.json"
+        st = json.loads(sp.read_text())
+        started = st["started"]
+        st["finished"] = True
+        sp.write_text(json.dumps(st))
+        with (repo / ".agentic" / "log.jsonl").open("a") as f:
+            f.write(json.dumps({"event": "run_finished", "ts": started + 5}) + "\n")
+        s = dashboard.snapshot(repo, running=False)
+        self.assertTrue(s["finished"])
+        self.assertAlmostEqual(s["elapsed_s"], 5, delta=0.5)
+        # frozen: a later call returns the SAME value (does not track wall-clock)
+        self.assertEqual(dashboard.snapshot(repo, running=False)["elapsed_s"], s["elapsed_s"])
+
     def test_snapshot_no_run(self):
         s = dashboard.snapshot(Path(tempfile.mkdtemp()))
         self.assertFalse(s["exists"])
