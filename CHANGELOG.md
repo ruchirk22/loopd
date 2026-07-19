@@ -4,6 +4,12 @@ All notable changes to loopd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and loopd uses
 [semantic versioning](https://semver.org/).
 
+## [0.1.3] — 2026-07-20
+
+### Changed
+- README: replaced the static logo with an animated logo GIF as the landing hero (renders on
+  GitHub and PyPI).
+
 ## [0.1.2] — 2026-07-19
 
 ### Fixed

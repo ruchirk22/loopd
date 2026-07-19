@@ -11,12 +11,7 @@ directs disposable developer sessions, and every step is verified by determinist
 
 Built on [Claude Code](https://docs.claude.com/en/docs/claude-code)'s headless mode.
 
-<p align="center"><img src="https://raw.githubusercontent.com/ruchirk22/loopd/main/orchestrator/assets/loopd_no_bg.png" width="170" alt="loopd"></p>
-
-<!-- TODO(assets): add a terminal GIF of a full `loopd` run to a verified finish here (record
-     with asciinema → agg/gif), and a Mission Control dashboard screenshot in "Basic usage".
-     These are the highest-leverage visual additions for the landing page. -->
-
+<p align="center"><img src="https://raw.githubusercontent.com/ruchirk22/loopd/main/orchestrator/assets/loopd_gif.gif" width="540" alt="loopd"></p>
 
 ## Why loopd?
 
