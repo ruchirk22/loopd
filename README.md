@@ -9,7 +9,7 @@ directs disposable developer sessions, and every step is verified by determinist
 
 Built on [Claude Code](https://docs.claude.com/en/docs/claude-code)'s headless mode.
 
-<p align="center"><img src="orchestrator/assets/loopd_no_bg.png" width="170" alt="loopd"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/ruchirk22/loopd/main/orchestrator/assets/loopd_no_bg.png" width="170" alt="loopd"></p>
 
 ## Why loopd?
 
