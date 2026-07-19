@@ -1,10 +1,10 @@
 ---
-description: Write .agentic/brief.md — the handover brief that seeds the agentic-loop PM
+description: Write .agentic/brief.md — the handover brief that seeds a loopd run
 ---
 
-You are handing the current task off to an automated PM+Developer build loop
-(the agentic-loop orchestrator). The loop's PM agent will know NOTHING about this
-conversation except what you write now — whatever you leave out, it will not know.
+You are handing the current task off to loopd, an autonomous engineering runtime. loopd's
+planner will know NOTHING about this conversation except what you write now — whatever you
+leave out, it will not know.
 
 Write the file `.agentic/brief.md` in the repository root (create the `.agentic/`
 directory if needed) with EXACTLY these sections, in this order:
@@ -38,8 +38,6 @@ A checklist of independently checkable statements that must ALL hold for the tas
 complete. Where possible phrase each so a shell command could verify it.
 
 Be exhaustive and concrete. After writing the file, print its path and tell the user to
-launch the loop with:
+review it, then launch loopd from the repo root with:
 
-    python run.py --repo <this repo> [--budget N]
-
-(the orchestrator picks up `.agentic/brief.md` automatically).
+    loopd --brief .agentic/brief.md [--budget N]

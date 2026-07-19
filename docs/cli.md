@@ -1,11 +1,11 @@
 # loopd CLI reference
 
 The single source of truth for every `loopd` command. For a guided walkthrough see
-[usage.md](usage.md); for the product thinking behind this experience see the CLI UX spec.
+[usage.md](usage.md).
 
-loopd is the execution layer around your coding agent: it **plans, forecasts, builds,
-verifies, recovers, remembers, and delivers** engineering work. You mostly think about one
-thing — *what you want built* — and run one command.
+loopd is an autonomous engineering runtime that only ships changes it can prove: it **plans,
+forecasts, builds, verifies, recovers, remembers, and delivers** engineering work. You mostly
+think about one thing — *what you want built* — and run one command.
 
 ## Install the `loopd` command
 
@@ -117,5 +117,6 @@ The cross-project registry (recent projects) lives under `~/.loopd` (override wi
 `LOOPD_HOME`). Everything answerable by a flag has a sensible default, so a first run needs
 no configuration at all.
 
-> `run.py` remains the low-level engine entrypoint (`python3 run.py "<task>" --repo <path>`);
-> `loopd` is the experience layer on top of it. New users should use `loopd`.
+> `python -m orchestrator.run "<task>" --repo <path>` is the low-level engine entrypoint;
+> `loopd` is the experience layer on top of it. New users should use `loopd`. See
+> [configuration.md](configuration.md#engine-flags-python--m-orchestratorrun) for the engine flags.

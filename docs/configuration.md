@@ -28,14 +28,18 @@ How the planner gets its context (in order of fidelity):
 | `--brief <file>` | Use an existing brief/spec file. |
 | task string / `@file` | A task described on the command line, or read from a file. |
 
-## CLI flags (`run.py`)
+## Engine flags (`python -m orchestrator.run`)
+
+These are the **low-level engine** flags. Day to day you use the [`loopd` command](cli.md),
+which wraps the engine and runs in the current directory (so no `--repo`, and `resume` instead
+of `--resume-run`). This form is for scripting or a source checkout.
 
 | Flag | Meaning |
 |---|---|
 | `--repo <path>` | **Required.** The project the developer works in. |
 | `--brief <path>` | Seed from a brief file. |
 | `--seed-session <id>` | Seed by forking an interactive session. |
-| `--resume-run` | Continue the interrupted run in `<repo>/.agentic/state.json`. |
+| `--resume-run` | Continue the interrupted run in `<repo>/.agentic/state.json` (the `loopd resume` equivalent). |
 | `--fresh` | Archive prior run state and start over. |
 | `--budget <usd>` | Override `BUDGET_USD` for this run. |
 | `--final-verify <cmd>` | Extra command required in final verification (repeatable). |
@@ -53,8 +57,7 @@ Exit codes: `0` verified done · `1` stopped with a report (or declined at the f
 ## Dashboard
 
 `loopd ui` starts Mission Control — the local web UI to launch and watch runs
-([usage](usage.md#5-mission-control--the-dashboard-loopd-ui)). (`python3 dashboard.py` is the
-equivalent low-level entry.)
+([usage](usage.md#5-mission-control--the-dashboard-loopd-ui)).
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -63,8 +66,8 @@ equivalent low-level entry.)
 | `--host` | `127.0.0.1` | bind host — keep it local |
 | `--port` | `8787` | port |
 
-It spawns `run.py` and reads the paths you give it, so it is a **local tool only** — do not
-bind it to a public interface.
+It spawns the engine (`python -m orchestrator.run`) and reads the paths you give it, so it is
+a **local tool only** — do not bind it to a public interface.
 
 ## Environment variables
 

@@ -14,7 +14,7 @@ docker build -t loopd .
 docker run --rm --env-file .env -v "$(pwd)/../my-app:/work" loopd --budget 25
 ```
 
-Running `python3 run.py` directly is fine for throwaway directories you don't mind the
+Running `loopd` directly on your machine is fine for throwaway directories you don't mind the
 agent modifying; anything you care about should go through the container or a disposable
 git worktree.
 

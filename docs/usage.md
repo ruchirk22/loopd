@@ -5,8 +5,9 @@ How to actually run loopd day to day. For the reference list of every flag and v
 [architecture.md](architecture.md).
 
 > **The `loopd` command is the day-to-day way in** — `loopd "<what to build>"` in your project,
-> and that's it. Every command is listed in the [CLI reference](cli.md). This guide shows the
-> underlying `run.py` engine and the concepts behind each step; both drive the same loop.
+> and that's it. Every command is listed in the [CLI reference](cli.md); the low-level engine
+> (`python -m orchestrator.run`) is in [configuration.md](configuration.md#engine-flags-python--m-orchestratorrun).
+> This guide teaches the concepts behind each step.
 
 ## 1. Setup (once)
 
@@ -27,19 +28,21 @@ Sanity check: `claude -p "say hi"` should reply, not error.
 
 ## 2. Give loopd a task
 
-There are four ways to hand over what you want built, in rough order of increasing context.
+loopd runs **in the current directory** — `cd` into your project first (or start an empty one
+and loopd runs `git init` for you). There are four ways to hand over what you want built, in
+rough order of increasing context.
 
 **A. Inline** — a one-liner:
 
 ```bash
-python3 run.py "Add a /health endpoint returning {\"status\":\"ok\"} plus a passing test" \
-  --repo ../my-service
+cd ../my-service
+loopd "Add a /health endpoint returning {\"status\":\"ok\"} plus a passing test"
 ```
 
-**B. A spec file** — for anything longer than a sentence, write it in a file and pass `@`:
+**B. A spec file** — for anything longer than a sentence, write it in a file and pass its path:
 
 ```bash
-python3 run.py @spec.md --repo ../my-service
+loopd spec.md
 ```
 
 **C. `/handoff` (recommended for real work).** If you already explored the task in an
@@ -49,26 +52,26 @@ command once, run it in your session, review the brief it writes, then launch:
 ```bash
 cp commands/handoff.md ../my-app/.claude/commands/   # once per repo (or into ~/.claude/commands/)
 # in an interactive Claude Code session opened on ../my-app, type:  /handoff
-# → it writes ../my-app/.agentic/brief.md ; review/edit it, then:
-python3 run.py --repo ../my-app --budget 25          # brief is picked up automatically
+# → it writes .agentic/brief.md ; review/edit it, then, from the repo:
+loopd --brief .agentic/brief.md --budget 25
 ```
 
-**D. `--seed-session <id>`.** Fork a live interactive session headlessly (the original is
-untouched) and let the fork distill the brief itself — highest fidelity. Must run from the
-same directory the session was opened in:
+**D. Fork a live session (`--seed-session <id>`).** Fork an interactive session headlessly
+(the original is untouched) and let the fork distill the brief itself — highest fidelity. Run
+from the same directory the session was opened in:
 
 ```bash
-python3 run.py --seed-session <session-id> --repo ../my-app
+loopd --seed-session <session-id>
 # find the id via `claude --resume` (picker) or: ls -t ~/.claude/projects/<slug>/*.jsonl | head -1
 ```
 
-`--repo` is always required. Point it at an **empty directory** to start a project from
-scratch (loopd runs `git init` for you) or at an **existing repo** to build on.
+Start a brand-new project from scratch with `loopd new "<idea>"`, or clone and build in one
+step with `loopd clone <url> "<task>"`.
 
 Precedence when several sources are present: `--brief` and `--seed-session` always win.
-Otherwise, on a fresh run inline/`@spec` task text is authoritative and (re)writes
+Otherwise, on a fresh run inline/spec task text is authoritative and (re)writes
 `.agentic/brief.md` — so a leftover brief from a previous task can't silently override a new
-one. On `--resume-run` the brief written at the start of that run is kept as-is.
+one. On `loopd resume` the brief written at the start of that run is kept as-is.
 
 ## 3. The Execution Forecast
 
@@ -113,12 +116,12 @@ If the estimate exceeds your budget, loopd asks what to do (on a terminal):
 Flags let you skip the prompt (CI, Docker, the dashboard):
 
 ```bash
-python3 run.py "Build OAuth" --repo ../svc --forecast-only   # just estimate, don't run
-python3 run.py "Build OAuth" --repo ../svc --forecast-only --json   # machine-readable
-python3 run.py "Build OAuth" --repo ../svc --yes             # accept the recommended budget
-python3 run.py "Build OAuth" --repo ../svc --force           # proceed at the current budget (constrained if short)
-python3 run.py "Build OAuth" --repo ../svc --constrained     # force constrained planning
-python3 run.py "Build OAuth" --repo ../svc --no-forecast     # skip the estimate entirely
+loopd "Build OAuth" --forecast-only          # just estimate, don't run
+loopd "Build OAuth" --forecast-only --json   # machine-readable
+loopd "Build OAuth" --yes                     # accept the recommended budget
+loopd "Build OAuth" --force                   # proceed at the current budget (constrained if short)
+loopd "Build OAuth" --constrained             # force constrained planning
+loopd "Build OAuth" --no-forecast             # skip the estimate entirely
 ```
 
 Non-interactively (no TTY) and with no flag, loopd proceeds at the current budget in
@@ -159,7 +162,7 @@ docker build -t loopd .
 docker run --rm --env-file .env -v "$(pwd)/../my-app:/work" loopd --budget 25
 ```
 
-Running `python3 run.py` directly is fine for a throwaway directory you don't mind the agent
+Running `loopd` directly is fine for a throwaway directory you don't mind the agent
 editing. See [security.md](security.md) for the full sandbox model.
 
 ## 5. Mission Control — the dashboard (`loopd ui`)
@@ -194,8 +197,8 @@ Before a run starts, the **Execution Forecast** appears as a modal with the one 
 decision (raise / keep-and-focus-on-core / not now) — the same choice the CLI offers.
 
 It's monochrome and quiet by design, reads the same `.agentic/` files the CLI writes,
-refreshes about every 1.5s, and is a **local tool** — it binds to `127.0.0.1` and spawns
-`run.py`, so don't expose it to a network. Flags: `--repo`, `--budget`, `--host`, `--port`
+refreshes about every 1.5s, and is a **local tool** — it binds to `127.0.0.1` and spawns the
+engine, so don't expose it to a network. Flags: `--repo`, `--budget`, `--host`, `--port`
 (see [configuration.md](configuration.md#dashboard)). Ctrl-C in the terminal closes it.
 
 ## 6. Write a good brief (the highest-leverage thing you do)
@@ -268,14 +271,14 @@ and — on failure — why it stopped. Then inspect the work itself:
 ```bash
 cd ../my-app
 git log --oneline            # baseline + one commit per accepted step, on agentic/run-<ts>
-git diff master              # everything the run changed
+git diff main                # everything the run changed (use your default branch)
 ```
 
-Each run works on its own `agentic/run-<timestamp>` branch, so your main branch is never
+Each run works on its own `agentic/run-<timestamp>` branch, so your default branch is never
 touched. To keep the work:
 
 ```bash
-git checkout master && git merge agentic/run-<timestamp>
+git checkout main && git merge agentic/run-<timestamp>
 ```
 
 ### Exit codes
@@ -283,15 +286,15 @@ git checkout master && git merge agentic/run-<timestamp>
 | Code | Meaning | What to do |
 |---|---|---|
 | `0` | verified done | merge the run branch |
-| `1` | stopped with a report | read `report.md` / `escalation.json`; fix the brief or repo, then `--resume-run` |
+| `1` | stopped with a report | read `report.md` / `escalation.json`; fix the brief or repo, then `loopd resume` |
 | `2` | setup / plan problem | fix the input (e.g. dirty tree, unusable brief) and re-run |
-| `3` | budget exceeded | raise `--budget` and `--resume-run` — progress is kept |
+| `3` | budget exceeded | `loopd resume --budget <higher>` — progress is kept |
 
 ## 10. Resume, retry, redo
 
 ```bash
-python3 run.py --resume-run --repo ../my-app --budget 40   # continue where it stopped
-python3 run.py --fresh      --repo ../my-app               # archive old state, start over
+loopd resume --budget 40     # continue where it stopped (run from the project dir)
+loopd "<task>" --fresh       # archive old state, start the task over
 ```
 
 Budget stops and interrupts are always resumable — you never lose accepted steps.
