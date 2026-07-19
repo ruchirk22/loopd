@@ -1,15 +1,22 @@
 # loopd
 
+[![PyPI](https://img.shields.io/pypi/v/loopd.svg)](https://pypi.org/project/loopd/)
 [![CI](https://github.com/ruchirk22/loopd/actions/workflows/ci.yml/badge.svg)](https://github.com/ruchirk22/loopd/actions/workflows/ci.yml)
-![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+[![Python](https://img.shields.io/pypi/pyversions/loopd.svg)](https://pypi.org/project/loopd/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-An autonomous coding loop that only ships changes it can prove. A persistent planner
+An autonomous engineering runtime that only ships changes it can prove. A persistent planner
 directs disposable developer sessions, and every step is verified by deterministic checks
 *outside* the model before it is committed.
 
 Built on [Claude Code](https://docs.claude.com/en/docs/claude-code)'s headless mode.
 
 <p align="center"><img src="https://raw.githubusercontent.com/ruchirk22/loopd/main/orchestrator/assets/loopd_no_bg.png" width="170" alt="loopd"></p>
+
+<!-- TODO(assets): add a terminal GIF of a full `loopd` run to a verified finish here (record
+     with asciinema → agg/gif), and a Mission Control dashboard screenshot in "Basic usage".
+     These are the highest-leverage visual additions for the landing page. -->
+
 
 ## Why loopd?
 
@@ -32,6 +39,21 @@ change per step, and stops with a clear report if it can't succeed — instead o
 handing back broken work.
 
 ## Architecture
+
+- **Persistent planner.** One long-lived session that plans, writes every developer
+  prompt, reviews every result, and decides what happens next.
+- **Disposable developer sessions.** Each step is implemented by a fresh session whose only
+  authority is to change code.
+- **Deterministic verification.** A step's checks are plain commands run by the
+  orchestrator. Exit 0, or it didn't happen.
+- **The orchestrator holds the rules.** Budgets, retries, commits, and the "is it done?"
+  decision live in code, never in a prompt.
+
+For the full picture — directives, handover packets, and guarantees — see
+[docs/architecture.md](docs/architecture.md).
+
+<details>
+<summary>The loop, as a text diagram</summary>
 
 ```
 your interactive Claude Code session
@@ -58,14 +80,7 @@ Execution Forecast  →  cost/runtime/steps estimate  →  raise budget · run c
        PRISTINE checkout · budget / attempt / replan caps · resumable state
 ```
 
-- **Persistent planner.** One long-lived session that plans, writes every developer
-  prompt, reviews every result, and decides what happens next.
-- **Disposable developer sessions.** Each step is implemented by a fresh session whose only
-  authority is to change code.
-- **Deterministic verification.** A step's checks are plain commands run by the
-  orchestrator. Exit 0, or it didn't happen.
-- **The orchestrator holds the rules.** Budgets, retries, commits, and the "is it done?"
-  decision live in code, never in a prompt.
+</details>
 
 ## Design philosophy
 
@@ -82,26 +97,22 @@ Execution Forecast  →  cost/runtime/steps estimate  →  raise budget · run c
 
 ## Key features
 
-- Plan → implement → **verify** → commit loop that runs unattended to completion.
-- **Execution Forecast** — before it builds, one cheap model call sizes the work and a
-  deterministic, self-calibrating estimator predicts cost, runtime, steps, and risk, then asks
-  whether to raise the budget or run constrained. It grades itself against actuals after every
-  run and gets truer over time.
-- A planner that stays in the loop: it reviews each result and re-plans on failure.
-- **Failure Analysis** — when loopd genuinely can't finish, it explains the blocker like a
-  senior engineer (what happened · why · what it'd do · other options) and continues from
-  your one-click choice, in the CLI or the dashboard.
-- **GitHub, if you want it** — build straight from an issue (`loopd #142`) and open a pull
-  request with a written handover when a run succeeds (`loopd pr`). Uses your existing `gh`
-  CLI login — loopd never touches your tokens — and is entirely optional.
-- **Engineering memory** — a structured `.agentic/memory.md` (architecture decisions, past
-  failures, TODOs) the planner reads every run and updates automatically.
-- Deterministic gates the model can't bypass, plus built-in probes for real-world checks
-  (HTTP, TCP ports, `docker build`, env files, "does the server actually boot").
-- One git commit per accepted step on a throwaway run branch — your main branch is untouched.
-- Per-run USD budget with mid-run enforcement; stops are resumable.
-- Seed a run from an interactive Claude Code session (`/handoff`) or a spec file.
-- Standard library only — no Python dependencies to install.
+- **Deterministic verification.** Gates the model can't bypass, plus built-in probes for
+  real-world checks (HTTP, TCP ports, `docker build`, env files, "does the server boot?").
+- **Execution Forecast.** Before it builds, loopd predicts cost, runtime, steps, and risk,
+  then asks the one decision that matters — the budget. It grades itself against actuals and
+  gets truer over time. [Read more →](docs/usage.md#3-the-execution-forecast)
+- **Failure Analysis.** When loopd genuinely can't finish, it explains the blocker like a
+  senior engineer (what happened · why · what it'd do · other options) and resumes from your
+  one-click choice.
+- **Engineering memory.** A structured `.agentic/memory.md` (decisions, past failures, TODOs)
+  the planner reads every run and updates automatically.
+- **GitHub, if you want it.** Build straight from an issue (`loopd #142`) and open a PR with a
+  written handover (`loopd pr`) — via your own `gh` login, never your tokens. Entirely optional.
+- **Reviewable by construction.** One git commit per accepted step on a throwaway branch;
+  your default branch is never touched.
+- **Bounded and resumable.** Per-run USD budget enforced mid-run; any stop resumes with one command.
+- **Zero dependencies.** Standard library only — `pip install loopd` and go.
 
 ## Quick start
 
@@ -140,11 +151,10 @@ lost, and `loopd resume` picks up exactly where it stopped.
 **Continuing work you've already scoped.** If you explored the task in an interactive
 Claude Code session, hand that context over instead of retyping it. Install the `/handoff`
 command (`cp commands/handoff.md <repo>/.claude/commands/`), run `/handoff` in that session
-to write `.agentic/brief.md`, review it, then launch — loopd picks the brief up
-automatically:
+to write `.agentic/brief.md`, review it, then launch from that repo:
 
 ```bash
-cd ../my-app && loopd --budget 25
+cd ../my-app && loopd --brief .agentic/brief.md --budget 25
 ```
 
 For real work, run inside the container so the developer's file access is confined to it
@@ -214,4 +224,14 @@ Going deeper:
 Project:
 
 - [CONTRIBUTING.md](CONTRIBUTING.md) · [CHANGELOG.md](CHANGELOG.md) ·
-  [ROADMAP.md](ROADMAP.md) · [LICENSE](LICENSE) (MIT)
+  [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) · [SECURITY.md](SECURITY.md)
+
+## Contributing
+
+Issues and pull requests are welcome. loopd stays stdlib-only and keeps the engine agnostic;
+see [CONTRIBUTING.md](CONTRIBUTING.md) for the setup, the tests, and the invariants a PR must
+hold. Please also read the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+## License
+
+[MIT](LICENSE) © Ruchir Kulkarni
