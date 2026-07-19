@@ -47,7 +47,8 @@ Run the suite before pushing; CI runs it on Python 3.10–3.13 and builds the pa
 
 - Bugs / ideas → [Issues](https://github.com/ruchirk22/loopd/issues).
 - Security vulnerabilities → **please do not open a public issue**; see
-  [docs/security.md](docs/security.md) for responsible disclosure.
+  [SECURITY.md](SECURITY.md) for how to report privately. (For the sandbox threat model, see
+  [docs/security.md](docs/security.md).)
 
 ## Being decent
 

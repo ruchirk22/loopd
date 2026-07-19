@@ -4,5 +4,5 @@ contact_links:
     url: https://github.com/ruchirk22/loopd/discussions
     about: Ask a question or float an idea in Discussions.
   - name: Security vulnerability
-    url: https://github.com/ruchirk22/loopd/blob/main/docs/security.md
-    about: Please report security issues privately — do not open a public issue.
+    url: https://github.com/ruchirk22/loopd/security/advisories/new
+    about: Please report security issues privately — do not open a public issue. See SECURITY.md.

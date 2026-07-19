@@ -4,6 +4,17 @@ All notable changes to loopd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and loopd uses
 [semantic versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- Documentation, packaging, and repository polish pass: converged on a single product
+  description across every surface, re-based the docs on the `loopd` command, de-duplicated
+  overlapping docs, and slimmed the published wheel to runtime assets only.
+
+### Added
+- `SECURITY.md` (vulnerability reporting), `CODE_OF_CONDUCT.md`, a `docs/` index, a
+  `github-actions` Dependabot config, Python trove classifiers, and `twine check` in CI.
+
 ## [0.1.0] — 2026-07-19
 
 The first public release. loopd is an autonomous engineering runtime on Claude Code that

@@ -1,0 +1,10 @@
+# loopd has NO Python runtime dependencies (stdlib-only), so there is no `pip` ecosystem to
+# watch. We only pin GitHub Actions, so Dependabot keeps those action versions patched.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
