@@ -33,7 +33,7 @@ import os
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Protocol
+from typing import List, Optional, Protocol
 
 from .claude_cli import run_claude
 from .config import Config
@@ -444,6 +444,20 @@ def analyze(cfg: Config, brief: str, ledger=None) -> Optional[EngineeringAnalysi
         return EngineeringAnalysis.from_dict(res.structured)
     except Exception:
         return None
+
+
+def resolve_brief(cfg: Config, task: Optional[str]) -> Optional[str]:
+    """Brief precedence for a standalone (--forecast-only) estimate: an explicit --brief wins,
+    then task text, then a stored .agentic/brief.md. Returns the brief text, or None if there
+    is nothing to size. Shared by the CLI and run.py so the rule lives in one place."""
+    if cfg.brief_path and Path(cfg.brief_path).is_file():
+        return Path(cfg.brief_path).read_text()
+    if task and task.strip():
+        return task.strip()
+    bf = cfg.state_dir / "brief.md"
+    if bf.is_file():
+        return bf.read_text()
+    return None
 
 
 def run_forecast(cfg: Config, brief: str, budget_usd: float, ledger=None,

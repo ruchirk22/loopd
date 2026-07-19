@@ -307,14 +307,8 @@ def _passthrough(args) -> List[str]:
 def _forecast_only_flow(task, cfg: Config, as_json: bool) -> int:
     import json as _json
     cfg.forecast_enabled = True
-    brief_file = cfg.state_dir / "brief.md"
-    if cfg.brief_path and Path(cfg.brief_path).is_file():
-        brief = Path(cfg.brief_path).read_text()
-    elif task and task.strip():
-        brief = task.strip()
-    elif brief_file.is_file():
-        brief = brief_file.read_text()
-    else:
+    brief = _forecast.resolve_brief(cfg, task)
+    if brief is None:
         say("Nothing to estimate — tell me what to build, or point me at a spec file.")
         return 2
     fc = _forecast.run_forecast(cfg, brief, cfg.budget_usd, ledger=None)
@@ -688,28 +682,6 @@ def cmd_version(argv: Optional[List[str]] = None) -> int:
 
 
 # --------------------------------------------------------------- helpers
-
-class _Flags:
-    """A defaults-only stand-in for parsed run flags (used by resume)."""
-    repo = None
-    budget = None
-    brief = None
-    seed_session = None
-    final_verify: List[str] = []
-    resume = True
-    fresh = False
-    yes = False
-    force = False
-    constrained = False
-    no_forecast = False
-    forecast_only = False
-    json = False
-    quiet = False
-
-
-def _empty_flags() -> _Flags:
-    return _Flags()
-
 
 def _repo_arg(argv: List[str]):
     """Ambient verbs accept an optional --repo; default to the current directory."""

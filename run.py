@@ -33,14 +33,8 @@ def _forecast_only(task, cfg: Config, as_json: bool) -> int:
     from orchestrator import forecast
 
     cfg.forecast_enabled = True  # --forecast-only implies you want the forecast
-    brief_file = cfg.state_dir / "brief.md"
-    if cfg.brief_path and Path(cfg.brief_path).is_file():
-        brief = Path(cfg.brief_path).read_text()
-    elif task and task.strip():
-        brief = task.strip()
-    elif brief_file.is_file():
-        brief = brief_file.read_text()
-    else:
+    brief = forecast.resolve_brief(cfg, task)
+    if brief is None:
         print("Nothing to forecast: provide a task string, --brief <file>, or an existing "
               ".agentic/brief.md.", file=sys.stderr)
         return 2

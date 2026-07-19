@@ -4,8 +4,8 @@ and decide — live, from the `.agentic/` data the loop writes.
 Stdlib only (http.server). LOCAL TOOL: it spawns processes and reads paths you give it, so
 it binds to 127.0.0.1 by default. Do not expose it to a network.
 
-    python3 dashboard.py --repo ../my-app          # default target repo, opens on :8787
-    python3 dashboard.py --port 9000
+    loopd ui                                       # the usual way in
+    python3 dashboard.py --repo ../my-app --port 9000   # equivalent, low-level entry
 
 Everything shown is real, recorded data — no fabricated ETAs or token counters.
 """
@@ -1186,11 +1186,6 @@ async function startRun(budget,constrained){
   const {ok,data}=await jpost("/api/run",{repo:REPO,task:PENDING.task,budget:budget,constrained:constrained,mode:"new"});
   if(!ok||!data.ok){ const m=$("#msg"); if(m){m.textContent="Couldn't start: "+((data&&data.error)||"unknown");m.className="msg err";} return; }
   tick();
-}
-async function resumeRun(add){
-  const b=(STATE&&STATE.budget_usd?STATE.budget_usd:CFG.default_budget)+ (add||0);
-  const {ok,data}=await jpost("/api/run",{repo:REPO,budget:b,mode:"resume"});
-  if(ok&&data.ok) tick();
 }
 
 /* ---------------- new project ---------------- */

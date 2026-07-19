@@ -15,7 +15,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 from . import forecast as _forecast
 from . import memory as _memory

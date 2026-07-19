@@ -9,7 +9,7 @@ the schemas, payload construction, and directive shape/evidence validation.
 from __future__ import annotations
 
 import re
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 from . import analysis, memory
 from .claude_cli import run_claude

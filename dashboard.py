@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Entrypoint for the loopd web dashboard. Launch and watch runs from a browser.
+"""Low-level entrypoint for the loopd web dashboard. Prefer `loopd ui`; this is the
+equivalent direct entry.
 
-    python3 dashboard.py --repo ../my-app      # default target repo, opens on :8787
-    python3 dashboard.py --port 9000
+    loopd ui                           # the usual way — opens on the current project
+    python3 dashboard.py --repo ../my-app --port 9000   # equivalent, low-level
 
 Local tool: binds to 127.0.0.1 by default and spawns run.py — do not expose it.
 """

@@ -143,7 +143,7 @@ to write `.agentic/brief.md`, review it, then launch — loopd picks the brief u
 automatically:
 
 ```bash
-python3 run.py --repo ../my-app --budget 25
+cd ../my-app && loopd --budget 25
 ```
 
 For real work, run inside the container so the developer's file access is confined to it
