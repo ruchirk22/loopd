@@ -604,7 +604,8 @@ PAGE = r"""<!doctype html>
 <title>loopd</title>
 <link rel="icon" href="/assets/loopd.svg">
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+/* System font stack only — the dashboard is a local tool and must render offline; the
+   font-family declarations below fall back cleanly to the OS UI + monospace fonts. */
 :root{
   --bg:#0b0b0c; --panel:#141416; --panel-2:#101012; --raise:#17171a;
   --line:rgba(255,255,255,.07); --line-2:rgba(255,255,255,.12);
@@ -981,7 +982,7 @@ function viewActive(s){
   const c=s.counts||{done:0,skipped:0,total:0};
   const pct=c.total?Math.round(100*(c.done+c.skipped)/c.total):0;
   const cur=s.current_step; const node=nodeLabel(s.active_node);
-  const head=cur?esc(cur.goal):(s.plan_summary?esc(s.plan_summary):"Starting your engineer…");
+  const head=cur?esc(cur.goal):(s.plan_summary?esc(s.plan_summary):"Starting the run…");
   const f=s.forecast||{}; const budget=(f.chosen_budget_usd||s.budget_usd||0);
   const spentPct=budget?Math.min(100,100*(s.total_cost_usd/budget)):0;
   const fmark=(budget&&f.estimated_cost_usd)?Math.min(100,100*(f.estimated_cost_usd/budget)):null;
@@ -1094,7 +1095,7 @@ function viewReport(s){
   return `<div class="screen">
     <div class="hero done">
       <div class="state"><span>&#10003; Delivered</span><span>${dur(s.elapsed_s)} &middot; ${money(s.total_cost_usd)}</span></div>
-      <div class="headline">Your engineer finished the work.</div>
+      <div class="headline">loopd finished the work.</div>
       <div class="sub">${task?esc(task):"See the summary below."}</div>
       <div class="verified">&#10003; every step's checks &nbsp;&nbsp; &#10003; full replay in a clean checkout</div>
     </div>
@@ -1163,7 +1164,7 @@ function forecastModal(f,task){
   let body;
   if(f){
     const gap=Number(f.budget_gap_usd)||0, short=gap>0;
-    body=`<h2>Execution forecast</h2><div class="lead">My estimate before we start.</div>
+    body=`<h2>Execution Forecast</h2><div class="lead">My estimate before we start.</div>
     <div class="fc">
       <div class="row"><span class="k">Estimated cost</span><span class="v">${money(f.estimated_cost_usd)}</span></div>
       <div class="row"><span class="k">Estimated time</span><span class="v">${fmin(f.estimated_runtime_min)}</span></div>

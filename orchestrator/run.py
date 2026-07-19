@@ -48,7 +48,8 @@ def _forecast_only(task, cfg: Config, as_json: bool) -> int:
 def main() -> None:
     load_dotenv()  # pick up model/budget overrides from .env (auth comes from Claude Code)
     ap = argparse.ArgumentParser(
-        description="Self-hosted PM+Developer agentic loop on Claude Code (headless).")
+        description="The loopd engine — an autonomous engineering runtime on Claude Code "
+                    "(low-level, headless; prefer the `loopd` command).")
     ap.add_argument("task", nargs="?", default=None,
                     help="Task description, or @path to read it from a file. "
                          "Optional when --brief / --seed-session / --resume-run is given.")

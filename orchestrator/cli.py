@@ -715,14 +715,14 @@ def cmd_config(argv: List[str]) -> int:
     say(_dim("  default budget   ") + f"${cfg.budget_usd:.2f}")
     say(_dim("  forecast         ") + ("on" if cfg.forecast_enabled else "off")
         + _dim(f"  ·  model {cfg.forecast_model}"))
-    say(_dim("  planner / dev    ") + f"{cfg.pm_model} / {cfg.dev_model}")
+    say(_dim("  planner / developer  ") + f"{cfg.pm_model} / {cfg.dev_model}")
     say(_dim("  workspace store  ") + str(workspace.home()))
     return 0
 
 
 def cmd_help(argv: Optional[List[str]] = None) -> int:
-    say(_b("loopd") + _dim(" — the execution layer around your coding agent. It plans, forecasts,"))
-    say(_dim("        builds, verifies, recovers, remembers, and delivers engineering work."))
+    say(_b("loopd") + _dim(" — an autonomous engineering runtime that only ships changes it can prove."))
+    say(_dim("        It plans, forecasts, builds, verifies, recovers, remembers, and delivers work."))
     say()
     say(_b("  Build something"))
     say('  loopd "<what to build>"        ' + _dim("build it here (current directory is the project)"))

@@ -184,7 +184,7 @@ class Ledger:
         if not (self.repo / ".git").exists():
             _git(["init"], self.repo)
         # Identity: required for commits; set repo-locally only if missing.
-        for key, val in (("user.name", "agentic-loop"), ("user.email", "agentic-loop@local")):
+        for key, val in (("user.name", "loopd"), ("user.email", "loopd@local")):
             if _git(["config", key], self.repo, check=False).returncode != 0:
                 _git(["config", key, val], self.repo)
         # Never let orchestrator state pollute the target repo's history.
@@ -196,7 +196,7 @@ class Ledger:
         # Baseline commit so there is always a HEAD to diff/reset against.
         if _git(["rev-parse", "--verify", "HEAD"], self.repo, check=False).returncode != 0:
             _git(["add", "-A"], self.repo)
-            _git(["commit", "-m", "agentic-loop: baseline", "--allow-empty"], self.repo)
+            _git(["commit", "-m", "loopd: baseline", "--allow-empty"], self.repo)
         if resume:
             ref = self.state.get("branch") if self.state else None
             if ref and self._current_ref() != ref:
@@ -220,7 +220,7 @@ class Ledger:
             # branch), leaving a clean HEAD to build on.
             if dirty:
                 _git(["add", "-A"], self.repo)
-                _git(["commit", "-m", "agentic-loop: pre-run snapshot of your uncommitted work",
+                _git(["commit", "-m", "loopd: pre-run snapshot of your uncommitted work",
                       "--allow-empty"], self.repo)
                 self.log({"event": "pre_run_snapshot", "branch": branch})
         elif dirty:
