@@ -53,7 +53,9 @@ class CliTestBase(unittest.TestCase):
     def run_cli(self, argv, code=0, fresh_fake=True):
         fake = FakeRun(code)
         p = mock.patch.object(cli.loop, "run", fake)
-        p.start(); self.addCleanup(p.stop)
+        # Claude Code isn't installed on CI; the build guard would otherwise block every run.
+        p2 = mock.patch.object(cli, "_require_claude", lambda: True)
+        p.start(); p2.start(); self.addCleanup(p.stop); self.addCleanup(p2.stop)
         buf = io.StringIO()
         with redirect_stdout(buf):
             rc = cli.main(argv)
@@ -122,6 +124,17 @@ class TestRouting(CliTestBase):
     def test_constrained_flag_flows(self):
         _, _, fake = self.run_cli(["do it", "--constrained"])
         self.assertTrue(fake.calls[0]["cfg"].constrained)
+
+    def test_build_requires_claude(self):
+        fake = FakeRun(0)
+        with mock.patch.object(cli.loop, "run", fake), \
+             mock.patch.object(cli, "_have", lambda c: c != "claude"):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = cli.main(["build a thing"])
+        self.assertEqual(rc, 2)
+        self.assertIn("Claude Code", buf.getvalue())
+        self.assertEqual(fake.calls, [])   # nothing ran
 
     def test_run_records_project(self):
         self.run_cli(["do it"])

@@ -55,6 +55,11 @@ class TestRegistry(unittest.TestCase):
         self.assertIn(str(self.repo.resolve()), names)
         self.assertNotIn(ghost["path"], names)
 
+    def test_config_marker(self):
+        self.assertFalse(workspace.is_configured())
+        workspace.mark_configured({"note": "hi"})
+        self.assertTrue(workspace.is_configured())
+
     def test_record_run_creates_entry_if_missing(self):
         workspace.record_run(self.repo, 3, 0.4)  # never registered first
         e = workspace.recent()[0]

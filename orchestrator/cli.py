@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -59,6 +60,70 @@ def _prompt(q: str) -> Optional[str]:
     except (EOFError, KeyboardInterrupt):
         print()
         return None
+
+
+# --------------------------------------------------------------- environment / onboarding
+
+def _have(cmd: str) -> bool:
+    return shutil.which(cmd) is not None
+
+
+def _require_claude() -> bool:
+    """loopd drives Claude Code; a build can't start without it. Friendly guidance, not a crash."""
+    if _have("claude"):
+        return True
+    say(_warn("  loopd needs Claude Code to run.") + _dim("  It reuses your Claude login — no keys."))
+    say(_dim("  Install: ") + "npm install -g @anthropic-ai/claude-code" + _dim("   then  ") + "claude login")
+    return False
+
+
+def _first_run_wizard() -> None:
+    """One-time, friendly setup. Detects the environment, offers to connect GitHub, and gets
+    out of the way. Auth is never asked for here — loopd rides your Claude Code login."""
+    say()
+    say(_b("  Welcome to loopd."))
+    say(_dim("  Let's get you ready."))
+    say()
+    (say(_ok("  ✓ ") + "Git detected") if _have("git")
+     else say(_warn("  ✗ ") + "Git not found — please install git"))
+    (say(_ok("  ✓ ") + "Claude Code detected")
+     if _have("claude") else
+     say(_warn("  ✗ ") + "Claude Code not found  " + _dim("(npm install -g @anthropic-ai/claude-code, then `claude login`)")))
+    gh_ready = github.available()["ok"]
+    say(_ok("  ✓ ") + "GitHub connected" if gh_ready
+        else _dim("  ○ ") + "GitHub not connected  " + _dim("(optional)"))
+    say()
+
+    if not gh_ready and _have("gh"):
+        ans = _prompt("  Connect GitHub now? [Y/n] > ")
+        if ans is None or ans.strip().lower() not in ("n", "no"):
+            say(_dim("  Opening GitHub sign-in…"))
+            try:
+                subprocess.run(["gh", "auth", "login"])
+            except (OSError, subprocess.SubprocessError):
+                pass
+            if github.available()["ok"]:
+                say(_ok("  ✓ ") + "Connected")
+
+    where = str(workspace.home())
+    ans = _prompt(f"  Where should loopd keep its data?  [{where}]  > ")
+    if ans and ans.strip() and str(Path(ans.strip()).expanduser()) != where:
+        say(_dim("  To use that, set ") + f"LOOPD_HOME={ans.strip()}" + _dim(" in your shell — using ")
+            + where + _dim(" for now."))
+
+    workspace.mark_configured()
+    say()
+    say(_ok("  Done.") + _dim("  What do you want to build?"))
+    say()
+
+
+def _maybe_onboard() -> None:
+    if workspace.is_configured() or not sys.stdin.isatty():
+        return
+    try:
+        _first_run_wizard()
+    except (EOFError, KeyboardInterrupt):
+        workspace.mark_configured()  # never nag twice
 
 
 # --------------------------------------------------------------- source detection
@@ -202,6 +267,9 @@ def cmd_run(argv: List[str]) -> int:
     if (task is None and not args.brief and not args.seed_session and not args.resume
             and not from_issue):
         return cmd_home([])                  # nothing to build → the workspace home
+
+    if not _require_claude():
+        return 2
 
     cfg = _build_cfg(repo, args)
     if from_issue and not cfg.brief_path:
@@ -538,6 +606,8 @@ def cmd_resume(argv: List[str]) -> int:
     p.add_argument("--budget", type=float, default=None)
     args = p.parse_args(argv)
     repo = Path(args.repo).expanduser().resolve() if args.repo else Path.cwd()
+    if not _require_claude():
+        return 2
 
     # If loopd stopped with a blocker, show the explanation and let the owner pick ONE option.
     # We never auto-apply — even the recommended path takes one explicit confirmation.
@@ -596,6 +666,8 @@ def cmd_new(argv: List[str]) -> int:
     if not task and not args.brief:
         say("Describe the new project, e.g. " + 'loopd new "a FastAPI TODO service on SQLite"')
         return 2
+    if not _require_claude():
+        return 2
     say(_acc("  New project") + _dim(f" in {repo.name}/ — I'll set up git and plan from scratch."))
     cfg = _build_cfg(repo, args)
     workspace.register(repo)
@@ -627,6 +699,8 @@ def cmd_clone(argv: List[str]) -> int:
     if not task:
         say(_dim("  Build something in it with ") + f'cd {dest.name} && loopd "<task>"')
         return 0
+    if not _require_claude():
+        return 2
     cfg = _build_cfg(dest, args)
     _open_line(dest)
     code = loop.run(task, cfg, on_start=(None if args.quiet else _reassure))
@@ -704,12 +778,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     load_dotenv()
     try:
         if not argv:
+            _maybe_onboard()
             return cmd_home([])
         head = argv[0]
         if head in ("-h", "--help", "help"):
             return cmd_help()
         if head in ("-V", "--version", "version"):
             return cmd_version()
+        _maybe_onboard()
         if head in DISPATCH:
             return DISPATCH[head](argv[1:])
         return cmd_run(argv)

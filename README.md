@@ -105,18 +105,19 @@ Execution Forecast  →  cost/runtime/steps estimate  →  raise budget · run c
 
 ## Quick start
 
-Requirements: **Python 3.10+**, **git**, and the **Claude Code CLI**
+Requirements: **Python 3.10+**, **git**, and the **[Claude Code CLI](https://docs.claude.com/en/docs/claude-code)**
 (`npm install -g @anthropic-ai/claude-code`).
 
 ```bash
-git clone https://github.com/ruchirk22/loopd
-cd loopd
-cp .env.example .env        # then set ANTHROPIC_API_KEY (or CLAUDE_CODE_OAUTH_TOKEN)
-ln -s "$(pwd)/loopd" /usr/local/bin/loopd     # put the `loopd` command on your PATH
+pip install loopd
+claude login                # loopd reuses your Claude Code login — no API keys, ever
 
-cd ../my-service            # the current directory is your project
+cd your-project             # the current directory is your project
 loopd "Add a /health endpoint that returns {\"status\":\"ok\"} plus a passing test"
 ```
+
+The first `loopd` walks you through a quick one-time setup, then gets out of your way. There's
+nothing to configure — see [INSTALL.md](INSTALL.md) for the full guide.
 
 The current directory is the project — you never paste a path. loopd forecasts the work,
 takes one decision (the budget), builds it, verifies it in a clean checkout, and hands you a
@@ -182,8 +183,8 @@ Exit codes: `0` verified done · `1` stopped with a report · `2` setup/plan pro
 
 ## Configuration
 
-Copy `.env.example` to `.env` and set your token; that's the only required configuration.
-Common knobs (all optional, via `.env` or environment):
+loopd needs **no configuration** to start — auth comes from your Claude Code login. `.env`
+(optional) only overrides defaults. Common knobs (all optional, via `.env` or environment):
 
 | Variable | Default | Meaning |
 |---|---|---|

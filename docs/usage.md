@@ -14,18 +14,14 @@ You need **Python 3.10+**, **git**, and the **Claude Code CLI**:
 
 ```bash
 npm install -g @anthropic-ai/claude-code
-git clone https://github.com/ruchirk22/loopd && cd loopd
-cp .env.example .env
+pip install loopd
+claude login                 # loopd reuses this — it never asks for or stores API keys
 ```
 
-Open `.env` and uncomment **exactly one** auth line:
-
-- `ANTHROPIC_API_KEY=sk-ant-...` — billed as API usage, or
-- `CLAUDE_CODE_OAUTH_TOKEN=...` — from `claude setup-token`, to use a Claude Pro/Max plan.
-
-> If both are set the API key wins, so leave the unused one commented — an unfilled
-> `sk-ant-...` placeholder will break auth. `.env` is git-ignored; loopd loads it
-> automatically, so you never `export` anything.
+That's it — **no auth to configure in loopd**. If you can run `claude`, loopd works. The
+first `loopd` runs a quick one-time setup (it checks your environment and offers to connect
+GitHub). For CI/headless, loopd will honor an `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`
+in the environment, but you never need to set one by hand.
 
 Sanity check: `claude -p "say hi"` should reply, not error.
 

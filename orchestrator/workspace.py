@@ -29,6 +29,23 @@ def _store() -> Path:
     return home() / "projects.json"
 
 
+def _config() -> Path:
+    return home() / "config.json"
+
+
+def is_configured() -> bool:
+    """Has the one-time first-run setup completed?"""
+    return _config().is_file()
+
+
+def mark_configured(extra: Optional[dict] = None) -> None:
+    home().mkdir(parents=True, exist_ok=True)
+    payload = {"setup_complete": True}
+    if extra:
+        payload.update(extra)
+    _config().write_text(json.dumps(payload, indent=2))
+
+
 def _load() -> dict:
     p = _store()
     if not p.is_file():
