@@ -1,0 +1,43 @@
+name: Bug report
+description: Something loopd did wrong or unexpectedly.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for the report. A `.agentic/report.md` or `.agentic/escalation.json` from the run helps a lot.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What did you expect, and what did loopd do instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The exact command(s) you ran.
+      placeholder: |
+        loopd "…" --repo ../my-project
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: Report / escalation (optional)
+      description: Paste the relevant part of `.agentic/report.md` or `escalation.json`. Redact anything sensitive.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: loopd version
+      placeholder: "loopd 0.1.0 (from `loopd version`)"
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: OS + Python
+      placeholder: "macOS 14 · Python 3.12"
+    validations:
+      required: true

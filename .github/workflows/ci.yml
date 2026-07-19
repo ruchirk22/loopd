@@ -22,3 +22,25 @@ jobs:
           git config --global user.name ci
       - name: Unit + end-to-end tests (stdlib only, no network, no API)
         run: python -m unittest discover -s tests -v
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the wheel + sdist
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+      - name: Confirm prompts + assets are bundled
+        run: |
+          python - <<'PY'
+          import glob, zipfile
+          whl = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(whl).namelist()
+          assert any(n.endswith("orchestrator/prompts/pm_system.md") for n in names), "prompts missing from wheel"
+          assert any("orchestrator/assets/loopd.svg" in n for n in names), "assets missing from wheel"
+          print("wheel OK:", whl)
+          PY

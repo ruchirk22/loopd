@@ -197,9 +197,20 @@ The full list of variables, CLI flags, and seeding options is in
 
 ## Documentation
 
+Start here:
+
+- [INSTALL.md](INSTALL.md) — get `loopd` working in a minute.
 - [docs/usage.md](docs/usage.md) — how to run loopd day to day.
-- [docs/architecture.md](docs/architecture.md) — how the loop, directives, and verification
-  fit together.
+- [docs/cli.md](docs/cli.md) — every command and flag.
+
+Going deeper:
+
+- [docs/architecture.md](docs/architecture.md) — how the loop, directives, and verification fit together.
 - [docs/configuration.md](docs/configuration.md) — every setting, flag, and seeding mode.
-- [docs/security.md](docs/security.md) — the sandbox model and what the guarantees do and
-  don't cover.
+- [docs/security.md](docs/security.md) — the sandbox model and what the guarantees do and don't cover.
+- [docs/faq.md](docs/faq.md) — the trust questions (does it store keys, where does my code go, …).
+
+Project:
+
+- [CONTRIBUTING.md](CONTRIBUTING.md) · [CHANGELOG.md](CHANGELOG.md) ·
+  [ROADMAP.md](ROADMAP.md) · [LICENSE](LICENSE) (MIT)

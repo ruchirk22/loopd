@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions & ideas
+    url: https://github.com/ruchirk22/loopd/discussions
+    about: Ask a question or float an idea in Discussions.
+  - name: Security vulnerability
+    url: https://github.com/ruchirk22/loopd/blob/main/docs/security.md
+    about: Please report security issues privately — do not open a public issue.
