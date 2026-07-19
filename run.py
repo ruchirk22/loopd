@@ -84,6 +84,11 @@ def main() -> None:
                     help="Non-interactively proceed at the current budget (constrained if the estimate is short).")
     ap.add_argument("--constrained", action="store_true",
                     help="Force budget-constrained planning (prioritize critical work, defer polish).")
+    # --- Failure Analysis (on --resume-run) ---
+    ap.add_argument("--fix", action="store_true",
+                    help="On resume, apply the recommended option from the failure analysis.")
+    ap.add_argument("--option", default=None, metavar="ID",
+                    help="On resume, apply a specific failure-analysis option by id.")
     args = ap.parse_args()
 
     try:
@@ -111,7 +116,13 @@ def main() -> None:
         if args.forecast_only:
             code = _forecast_only(task, cfg, args.json)
         else:
-            code = run(task, cfg, resume=args.resume_run, fresh=args.fresh)
+            resume_choice = None
+            if args.resume_run and (args.fix or args.option):
+                from orchestrator import analysis
+                resume_choice = analysis.resolve_choice(cfg.repo, option_id=args.option,
+                                                        recommended=args.fix)
+            code = run(task, cfg, resume=args.resume_run, fresh=args.fresh,
+                       resume_choice=resume_choice)
     except StateConflict as exc:
         print(f"\n{exc}", file=sys.stderr)
         code = 2

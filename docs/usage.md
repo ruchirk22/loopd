@@ -303,6 +303,23 @@ A resume keeps the run's original budget unless you pass `--budget` again, so af
 budget stop (exit `3`) you must raise `--budget` to make headroom — resuming without it
 just stops at the same cap.
 
+**When loopd gets stuck (Failure Analysis).** If a step can't be made to pass and loopd
+gives up, it doesn't just stop — it explains the blocker like a senior engineer would, in
+four beats: *what happened · why it happened · what I'd do · other options*. You see the same
+explanation in `loopd status`, on the stop itself, and in the dashboard's calm amber "needs
+you" state. It always ends with a recommended next step and a couple of alternatives (e.g.
+*add a test fixture* · *set an env var yourself* · *skip this step*). Nothing is auto-applied:
+
+```bash
+loopd resume                 # shows the diagnosis and lets you pick one option
+loopd resume --yes           # take the recommended option
+loopd resume --option skip   # take a specific option by id
+```
+
+The explanation is grounded only in what loopd actually saw (the verification transcripts and
+developer summaries); when the cause is uncertain it says so rather than guessing, and the
+root cause is folded into project memory so future runs avoid the same wall.
+
 ## 11. Control cost
 
 - Set a ceiling with `--budget` (or `BUDGET_USD` in `.env`); it's enforced after every model

@@ -29,8 +29,9 @@ class FakeRun:
         self.code = code
         self.calls = []
 
-    def __call__(self, task, cfg, resume=False, fresh=False, on_start=None):
-        self.calls.append({"task": task, "cfg": cfg, "resume": resume, "fresh": fresh})
+    def __call__(self, task, cfg, resume=False, fresh=False, on_start=None, resume_choice=None):
+        self.calls.append({"task": task, "cfg": cfg, "resume": resume, "fresh": fresh,
+                           "resume_choice": resume_choice})
         if on_start:
             on_start()
         return self.code
@@ -179,6 +180,20 @@ class TestAmbient(CliTestBase):
     def test_resume_calls_engine_with_resume(self):
         _, _, fake = self.run_cli(["resume"])
         self.assertTrue(fake.calls[0]["resume"])
+
+    def test_resume_yes_applies_recommended_analysis_option(self):
+        ad = self.repo / ".agentic"; ad.mkdir(exist_ok=True)
+        (ad / "analysis.json").write_text(json.dumps({
+            "summary": "stuck", "root_cause": "needs redis", "category": "environment",
+            "step": "6", "reason": "pm_abort",
+            "options": [{"id": "fix", "label": "Add fixture", "kind": "loopd_fix", "recommended": True},
+                        {"id": "stop", "label": "Stop", "kind": "abort"}]}))
+        _, out, fake = self.run_cli(["resume", "--yes"])
+        self.assertIn("What happened", out)              # the diagnosis is shown
+        rc = fake.calls[0]["resume_choice"]
+        self.assertIsNotNone(rc)
+        self.assertEqual(rc["kind"], "loopd_fix")
+        self.assertEqual(rc["step"], "6")
 
     def test_ui_launches_dashboard(self):
         served = {}

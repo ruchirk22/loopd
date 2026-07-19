@@ -503,5 +503,72 @@ class TestForecastInLoop(LoopTestBase):
         self.assertTrue(cfg.constrained)
 
 
+FA_ABORT = {
+    "verdict": "abort", "reasoning": "step is stuck on the environment",
+    "failure_analysis": {
+        "summary": "Step 1 can't pass its checks.",
+        "root_cause": "The check needs a file the environment can't provide — connection refused in the transcript.",
+        "category": "environment", "confidence": 80,
+        "options": [
+            {"label": "Add a test fixture", "detail": "provide the dependency", "kind": "loopd_fix", "recommended": True},
+            {"label": "Skip this step", "kind": "descope"},
+        ],
+    },
+}
+
+
+class TestFailureAnalysisInLoop(LoopTestBase):
+    def test_pm_abort_persists_and_renders_analysis(self):
+        from orchestrator import analysis
+        self.cfg.max_attempts_per_step = 1  # one dev attempt, then the red-gate review
+        self.patch_agents(
+            pm_script=[
+                (None, plan_directive(["test -f never.txt"])),   # a check the dev can't satisfy
+                ("Author", DISPATCH),
+                ("Review", FA_ABORT),                            # gates red → abort with analysis
+            ],
+            dev_script=[("Create", DEV_NOOP)],
+        )
+        rc = loop.run(None, self.cfg)
+        self.assertEqual(rc, 1)
+        fa = analysis.load(self.cfg.repo)
+        self.assertIsNotNone(fa)
+        self.assertEqual(fa.category, "environment")
+        self.assertEqual(fa.recommended.label, "Add a test fixture")
+        self.assertTrue((self.cfg.state_dir / "analysis.json").is_file())
+        # the grounded root cause is folded into the failure memory note
+        self.assertIn("connection refused",
+                      (self.cfg.state_dir / "memory.md").read_text().lower())
+
+    def test_apply_resume_choice_descope_then_fix(self):
+        from orchestrator.plan import Plan, Step
+        led = Ledger.load_or_start(self.cfg)
+        led.save_plan(Plan(steps=[Step(id="2", goal="g", acceptance_criteria=["a"], verify=["true"])]))
+        g = loop._apply_resume_choice(led, True, {"kind": "descope", "step": "2", "label": "skip it"})
+        self.assertIsNone(g)
+        self.assertEqual(led.load_plan().steps[0].status, "skipped")
+        g2 = loop._apply_resume_choice(led, True, {"kind": "loopd_fix", "guidance": "add a redis fixture"})
+        self.assertEqual(g2, "add a redis fixture")
+        self.assertIsNone(loop._apply_resume_choice(led, False, {"kind": "loopd_fix", "guidance": "x"}))
+
+    def test_success_clears_stale_analysis(self):
+        from orchestrator import analysis
+        (self.cfg.state_dir).mkdir(exist_ok=True)
+        (self.cfg.state_dir / "analysis.json").write_text('{"summary":"old","root_cause":"x","category":"unknown","options":[{"label":"a","kind":"abort"}]}')
+        self.patch_agents(
+            pm_script=[
+                ("Create the plan", plan_directive(["test -f hello.txt"])),
+                ("Author", DISPATCH),
+                ("Review", ACCEPT),
+                ("All planned steps are accepted",
+                 {"verdict": "task_complete", "reasoning": "done", "final_verify": ["test -f hello.txt"]}),
+            ],
+            dev_script=[("Create hello.txt", dev_writes_hello())],
+        )
+        rc = loop.run(None, self.cfg)
+        self.assertEqual(rc, 0)
+        self.assertIsNone(analysis.load(self.cfg.repo))  # cleared on success
+
+
 if __name__ == "__main__":
     unittest.main()

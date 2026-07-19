@@ -37,7 +37,7 @@ alias loopd="python3 /path/to/loopd/loopd"     # add to ~/.zshrc / ~/.bashrc
 | `loopd path/to/spec.md` | Build from a markdown spec file. |
 | `loopd new "<idea>"` | Start a brand-new project from scratch in the current folder (sets up git). |
 | `loopd clone <url> ["<task>"]` | Clone a repo, then optionally start building in it. |
-| `loopd resume` | Continue the paused run in this project (honors its original budget/decision). |
+| `loopd resume` | Continue the paused run. If loopd stopped with a blocker, it shows the diagnosis and lets you pick one option (`--yes` for the recommended, `--option <id>` for a specific one). |
 | `loopd <github-issue>` | *(coming with GitHub Integration)* build straight from an issue. |
 
 ## Look in (all read-only, all optional)
@@ -45,7 +45,7 @@ alias loopd="python3 /path/to/loopd/loopd"     # add to ~/.zshrc / ~/.bashrc
 | Command | What it does |
 |---|---|
 | `loopd` | The workspace home: this project's status, history, and "what do you want to build?" |
-| `loopd status` | What's happening now, or how the last run went. |
+| `loopd status` | What's happening now, or how the last run went — including the blocker explanation if loopd is stuck. |
 | `loopd plan` | The current plan as a checklist. |
 | `loopd report` | The full write-up of the last run. |
 | `loopd logs` | Recent activity. |

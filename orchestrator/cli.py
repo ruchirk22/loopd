@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-from . import loop, workspace
+from . import analysis, loop, workspace
 from . import forecast as _forecast
 from .config import Config
 from .env import load_dotenv
@@ -368,9 +368,13 @@ def cmd_status(argv: List[str]) -> int:
         say(_ok("  ✓ Last run complete") + _dim(f"  ·  {rs['steps_done']}/{rs['steps_total']} steps · ${rs['cost_usd']:.2f}"))
         say(_dim("  Full write-up: ") + "`loopd report`")
     else:
-        say(_warn("  ▸ Run in progress / paused") + _dim(f"  ·  “{rs['task']}”"))
-        say(_dim(f"    {rs['steps_done']} of {rs['steps_total']} done · ${rs['cost_usd']:.2f} spent"))
-        say(_dim("  Resume with ") + "`loopd resume`" + _dim("  ·  watch with ") + "`loopd ui`")
+        fa = analysis.load(repo)
+        if fa:
+            say(analysis.render(fa))   # the blocker, explained — same content the dashboard shows
+        else:
+            say(_warn("  ▸ Run in progress / paused") + _dim(f"  ·  “{rs['task']}”"))
+            say(_dim(f"    {rs['steps_done']} of {rs['steps_total']} done · ${rs['cost_usd']:.2f} spent"))
+            say(_dim("  Resume with ") + "`loopd resume`" + _dim("  ·  watch with ") + "`loopd ui`")
     return 0
 
 
@@ -456,13 +460,60 @@ def cmd_projects(argv: List[str]) -> int:
 
 
 def cmd_resume(argv: List[str]) -> int:
-    repo = _repo_arg(argv)
-    cfg = _build_cfg(repo, _empty_flags())
+    p = argparse.ArgumentParser(prog="loopd resume", add_help=True)
+    p.add_argument("--repo")
+    p.add_argument("-y", "--yes", "--fix", action="store_true", dest="yes",
+                   help="apply the recommended option without asking")
+    p.add_argument("--option", help="apply a specific option by id")
+    p.add_argument("--budget", type=float, default=None)
+    args = p.parse_args(argv)
+    repo = Path(args.repo).expanduser().resolve() if args.repo else Path.cwd()
+
+    # If loopd stopped with a blocker, show the explanation and let the owner pick ONE option.
+    # We never auto-apply — even the recommended path takes one explicit confirmation.
+    fa = analysis.load(repo)
+    choice = None
+    if fa:
+        say(analysis.render(fa))
+        opt = None
+        if args.option:
+            opt = fa.option(args.option)
+        elif args.yes:
+            opt = fa.recommended
+        elif sys.stdin.isatty():
+            opt = _resume_pick(fa)
+        # non-interactive with no flag → a plain resume (re-attempt), which is itself explicit.
+        if opt is not None:
+            if opt.kind == "abort":
+                say(_dim("  Leaving it here — the work so far is committed."))
+                return 0
+            choice = analysis.resolve_choice(repo, option_id=opt.id)
+            say(_dim("  Continuing: ") + opt.label)
+
+    cfg = _build_cfg(repo, args)
     workspace.register(repo)
     _open_line(repo)
-    code = loop.run(None, cfg, resume=True, on_start=_reassure)
+    code = loop.run(None, cfg, resume=True, on_start=_reassure, resume_choice=choice)
     _close_line(repo, code)
     return code
+
+
+def _resume_pick(fa):
+    """Interactive one-confirmation pick. Enter accepts the recommended option."""
+    ordered = [fa.recommended] + [o for o in fa.options if o is not fa.recommended]
+    say("")
+    for i, o in enumerate(ordered, 1):
+        tag = _dim("  (recommended)") if o.recommended else ""
+        say(f"  {i}  {o.label}{tag}")
+    ans = _prompt("  Which? [1] > ")
+    if ans is None:
+        return fa.recommended
+    ans = ans.strip()
+    if ans == "":
+        return fa.recommended
+    if ans.isdigit() and 1 <= int(ans) <= len(ordered):
+        return ordered[int(ans) - 1]
+    return fa.recommended
 
 
 def cmd_new(argv: List[str]) -> int:

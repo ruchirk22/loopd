@@ -70,8 +70,18 @@ class TestSnapshot(unittest.TestCase):
 
     def test_snapshot_of_a_run_has_forecast_and_health_keys(self):
         s = dashboard.snapshot(repo_with_run(), running=True)
-        for k in ("name", "health", "memory_count", "forecast_accuracy", "runs", "escalation"):
+        for k in ("name", "health", "memory_count", "forecast_accuracy", "runs", "escalation",
+                  "analysis"):
             self.assertIn(k, s)
+
+    def test_snapshot_exposes_failure_analysis(self):
+        repo = repo_with_run()
+        (repo / ".agentic" / "analysis.json").write_text(json.dumps({
+            "summary": "stuck", "root_cause": "needs redis", "category": "environment",
+            "options": [{"id": "fix", "label": "Add fixture", "kind": "loopd_fix", "recommended": True}]}))
+        s = dashboard.snapshot(repo, running=False)
+        self.assertIsNotNone(s["analysis"])
+        self.assertEqual(s["analysis"]["category"], "environment")
 
 
 class TestProjectsList(unittest.TestCase):
@@ -108,6 +118,13 @@ class TestStepDetail(unittest.TestCase):
 
 
 class TestBuildCommand(unittest.TestCase):
+    def test_resume_carries_failure_analysis_option(self):
+        cmd = dashboard.build_run_command("/tmp/x", 8, "resume", option="add-redis-fixture")
+        self.assertIn("--option", cmd)
+        self.assertIn("add-redis-fixture", cmd)
+        # a fresh run never carries a resume option
+        self.assertNotIn("--option", dashboard.build_run_command("/tmp/x", 8, "new", option="x"))
+
     def test_new_vs_resume(self):
         self.assertIn("--fresh", dashboard.build_run_command("/tmp/x", 8, "new"))
         self.assertIn("--resume-run", dashboard.build_run_command("/tmp/x", 8, "resume"))

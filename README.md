@@ -88,6 +88,9 @@ Execution Forecast  →  cost/runtime/steps estimate  →  raise budget · run c
   whether to raise the budget or run constrained. It grades itself against actuals after every
   run and gets truer over time.
 - A planner that stays in the loop: it reviews each result and re-plans on failure.
+- **Failure Analysis** — when loopd genuinely can't finish, it explains the blocker like a
+  senior engineer (what happened · why · what it'd do · other options) and continues from
+  your one-click choice, in the CLI or the dashboard.
 - **Engineering memory** — a structured `.agentic/memory.md` (architecture decisions, past
   failures, TODOs) the planner reads every run and updates automatically.
 - Deterministic gates the model can't bypass, plus built-in probes for real-world checks

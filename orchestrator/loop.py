@@ -17,7 +17,7 @@ import sys
 import time
 from typing import List, Optional, Tuple
 
-from . import developer, forecast, gates, memory
+from . import analysis, developer, forecast, gates, memory
 from .config import Config
 from .handover import Handover, build_handover
 from .ledger import BudgetExceeded, GitError, Ledger, NoChangesError
@@ -34,7 +34,7 @@ class RunAborted(RuntimeError):
 
 
 def run(task: Optional[str], cfg: Config, resume: bool = False, fresh: bool = False,
-        on_start=None) -> int:
+        on_start=None, resume_choice: Optional[dict] = None) -> int:
     # StateConflict (bad/missing/finished state, dirty tree w/o run branch) is a pre-loop
     # setup failure (exit 2, handled by run.py). A GitError while (re)establishing the repo
     # is resumable but has no ledger yet to escalate through — report and exit 1.
@@ -49,7 +49,7 @@ def run(task: Optional[str], cfg: Config, resume: bool = False, fresh: bool = Fa
     session_t0 = time.time()  # active time of THIS invocation (excludes idle between resumes)
     code, detail = 1, ""
     try:
-        code = _run(task, cfg, ledger, resume, on_start=on_start)
+        code = _run(task, cfg, ledger, resume, on_start=on_start, resume_choice=resume_choice)
     except BudgetExceeded as exc:
         code, detail = 3, str(exc)
         ledger.write_escalation("budget_exceeded", ledger.load_plan(), detail=detail)
@@ -98,6 +98,18 @@ def run(task: Optional[str], cfg: Config, resume: bool = False, fresh: bool = Fa
                 print(forecast.render_comparison(predicted, actual))
         except Exception:  # grading must never mask the real exit code
             pass
+        # If the run stopped unfinished and the PM didn't already diagnose it (budget/time
+        # stop, crash, replan-cap), leave a basic deterministic explanation so the CLI and
+        # dashboard 'needs you' state always have something grounded to show.
+        try:
+            if code != 0 and analysis.load(cfg.repo) is None:
+                esc = _read_escalation(cfg)
+                fa = analysis.fallback(esc.get("reason", ""), esc.get("step", ""),
+                                       esc.get("detail") or esc.get("pm_reasoning", ""))
+                if fa:
+                    ledger.write_analysis(fa, source="fallback")
+        except Exception:
+            pass
         # Record a durable failure note in project memory only for genuine mid-run aborts —
         # skip success (0), setup/plan (2), budget (3), and operational stops like the
         # wall-clock cap. Success-path memory is written by the PM via task_complete.
@@ -106,15 +118,28 @@ def run(task: Optional[str], cfg: Config, resume: bool = False, fresh: bool = Fa
             try:
                 task = (ledger.state.get("task") or "").strip().splitlines()
                 task = task[0][:80] if task else "task"
-                reason = (detail.strip().splitlines()[0][:140] if detail else "run stopped")
+                # Prefer the grounded root cause from failure analysis, if we have one.
+                note = ledger.state.get("_failure_note")
+                reason = (note or (detail.strip().splitlines()[0] if detail else "run stopped"))[:160]
                 memory.merge(cfg.repo, {memory.FAILURES: [f"{task}: {reason}"]})
             except Exception:
                 pass
     return code
 
 
+def _read_escalation(cfg: Config) -> dict:
+    import json as _json
+    p = cfg.state_dir / "escalation.json"
+    if not p.is_file():
+        return {}
+    try:
+        return _json.loads(p.read_text())
+    except (OSError, _json.JSONDecodeError):
+        return {}
+
+
 def _run(task: Optional[str], cfg: Config, ledger: Ledger, resume: bool,
-         on_start=None) -> int:
+         on_start=None, resume_choice: Optional[dict] = None) -> int:
     t0 = time.time()
     if not resume:
         ledger.start(task or "(from brief)")
@@ -125,12 +150,21 @@ def _run(task: Optional[str], cfg: Config, ledger: Ledger, resume: bool,
     elif resume:
         _restore_constrained(cfg, ledger)     # re-forecasting is skipped; honor the prior choice
 
-    # The forecast decision is made; real work is about to begin. This is where the CLI says
-    # "I've got it from here" — it must land after budget negotiation, not before.
+    # Apply the owner's choice from Failure Analysis (they picked one option; we never auto-act):
+    # a descope skips the stuck step now; a "loopd_fix" becomes guidance the planner follows.
+    resume_guidance = _apply_resume_choice(ledger, resume, resume_choice)
+    ledger.clear_analysis()  # the blocker has been acted on — clear the 'needs you' state
+
+    # The decision is made; real work is about to begin. This is where the CLI says
+    # "I've got it from here" — it must land after any negotiation, not before.
     if on_start:
         on_start()
 
     pm = PMSession(cfg, ledger, brief)
+    if resume_guidance:
+        pm.resume_guidance = resume_guidance      # the planner sees the owner's chosen approach
+        pm.session_id = None                      # reseed so the decision reaches it
+        ledger.set_pm_session(None)
 
     plan = ledger.load_plan()
     if plan is None or not plan.steps:
@@ -255,6 +289,27 @@ def _restore_constrained(cfg: Config, ledger: Ledger) -> None:
     fc = ledger.state.get("forecast")
     if isinstance(fc, dict) and fc.get("constrained"):
         cfg.constrained = True
+
+
+def _apply_resume_choice(ledger: Ledger, resume: bool, choice: Optional[dict]) -> Optional[str]:
+    """Act on the option the owner picked in Failure Analysis. Returns planner guidance for a
+    'loopd_fix', or None. A 'descope' skips the stuck step right here; other kinds just resume."""
+    if not (resume and choice):
+        return None
+    kind = choice.get("kind")
+    if kind == "descope":
+        plan = ledger.load_plan()
+        step = next((s for s in (plan.steps if plan else []) if s.id == choice.get("step")), None)
+        if step:
+            step.status = SKIPPED
+            step.skip_reason = ("owner chose to skip: " + str(choice.get("label", "")))[:500]
+            ledger.reset_to_head(f"skip step {step.id} (owner)")
+            ledger.save_plan(plan)
+            ledger.log({"event": "step_descoped", "step": step.id, "reason": "owner_choice"})
+        return None
+    if kind == "loopd_fix":
+        return str(choice.get("guidance") or "").strip() or None
+    return None  # user_action / abort → a plain resume
 
 
 # --------------------------------------------------------------- phases
@@ -572,9 +627,26 @@ def _checkpoint(pm: PMSession, plan: Plan, ledger: Ledger) -> None:
 
 def _abort(ledger: Ledger, plan: Optional[Plan], d: dict, step_id: str = "") -> None:
     reason = str(d.get("reasoning", ""))[:2000]
-    path = ledger.write_escalation("pm_abort", plan, pm_reasoning=reason, step_id=step_id)
+    ledger.write_escalation("pm_abort", plan, pm_reasoning=reason, step_id=step_id)
+    # Explain the blocker like a senior engineer: prefer the PM's grounded failure_analysis;
+    # if it didn't provide one, synthesize a minimal analysis from its reasoning.
+    fa_raw = d.get("failure_analysis")
+    if isinstance(fa_raw, dict) and fa_raw.get("options"):
+        fa = analysis.FailureAnalysis.from_dict({**fa_raw, "step": step_id, "reason": "pm_abort"})
+        source = "pm"
+    else:
+        fa = analysis.FailureAnalysis.from_dict({
+            "summary": "I've stopped — I can't finish this from here.",
+            "root_cause": reason or "See the reasoning above.", "category": "unknown",
+            "confidence": 40, "step": step_id, "reason": "pm_abort",
+            "options": [{"label": "Let me try again", "kind": "user_action", "recommended": True,
+                         "detail": "Resume and re-attempt."},
+                        {"label": "Stop here", "kind": "abort"}]})
+        source = "fallback"
+    ledger.write_analysis(fa, source=source)
+    ledger.state["_failure_note"] = f"{fa.summary} {fa.root_cause}"[:180]  # richer memory note
     print("\n" + ledger.report(plan))
-    print(f"\nPM aborted the run: {reason}\nEscalation report: {path}")
+    print(analysis.render(fa))
     raise RunAborted(1, "PM abort")
 
 

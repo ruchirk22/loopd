@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from typing import List, Optional, Tuple
 
-from . import memory
+from . import analysis, memory
 from .claude_cli import run_claude
 from .config import Config
 from .ledger import Ledger
@@ -93,6 +93,10 @@ def directive_schema(verdicts: List[str]) -> dict:
         }
     if "plan" in verdicts or "replan" in verdicts:
         props["plan_mutations"] = _MUTATION_SCHEMA
+    if "abort" in verdicts:
+        # When you give up, explain the blocker like a senior engineer would (grounded in the
+        # transcripts you've seen). Surfaced to the owner in the CLI and dashboard.
+        props["failure_analysis"] = analysis.FAILURE_ANALYSIS_SCHEMA
     if "task_complete" in verdicts:
         props["final_verify"] = {"type": "array", "items": {"type": "string"}}
         props["memory"] = {
@@ -275,6 +279,9 @@ class PMSession:
         # True once the session was lost mid-stream and reseeded fresh (context not
         # continuous); blocks non-degradable turns like checkpoints from fabricating.
         self.degraded: bool = False
+        # Set on a resume-after-blocker: the approach the owner chose in Failure Analysis,
+        # injected into the seed so the planner continues that way.
+        self.resume_guidance: Optional[str] = None
 
     # ----- session plumbing -----
 
@@ -307,6 +314,12 @@ class PMSession:
                 "Open risks:\n" + "\n".join(f"- {r}" for r in ckpt.get("open_risks", [])) + "\n"
                 f"Remaining plan: {ckpt.get('remaining_plan_note', '')}\n"
                 f"Advice to you: {ckpt.get('advice_to_successor', '')}")
+        if self.resume_guidance:
+            parts.append(
+                "\n## Owner's decision on the blocker\n"
+                "The run had stopped and you explained why. The owner reviewed it and chose "
+                "this way forward:\n  " + self.resume_guidance + "\n"
+                "Take this approach for the stuck step, then continue the plan.")
         if plan is not None and plan.steps:
             parts.append("\n## Current plan state (ledger digest — ground truth)\n" + plan.digest())
         return "\n".join(parts)

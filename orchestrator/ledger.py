@@ -175,6 +175,7 @@ class Ledger:
     def start(self, task: str) -> None:
         self.state["task"] = task
         self._save()
+        self.clear_analysis()  # a new run starts with no stale 'needs you' state
         self.log({"event": "run_started", "task": task[:2000]})
 
     # ---------- git ----------
@@ -495,6 +496,24 @@ class Ledger:
                              f"(attempts={s.attempts}, rejections={s.rejections}, ${s.cost_usd:.4f}){sha}")
         return "\n".join(lines)
 
+    def write_analysis(self, fa, source: str = "pm") -> Path:
+        """Persist a Failure Analysis (analysis.FailureAnalysis) to .agentic/analysis.json so the
+        CLI and dashboard 'needs you' state render the same explanation."""
+        d = fa.to_dict()
+        d["source"] = source
+        path = self.cfg.state_dir / "analysis.json"
+        path.write_text(json.dumps(d, indent=2))
+        self.log({"event": "failure_analysis", "reason": d.get("reason", ""), "source": source})
+        return path
+
+    def clear_analysis(self) -> None:
+        """A resolved blocker leaves no lingering 'needs you' state (survives --fresh otherwise)."""
+        p = self.cfg.state_dir / "analysis.json"
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
     def write_escalation(self, reason: str, plan: Optional[Plan], detail: str = "",
                          pm_reasoning: str = "", step_id: str = "") -> Path:
         payload = {
@@ -514,6 +533,7 @@ class Ledger:
     def finish(self) -> None:
         self.state["finished"] = True
         self._save()
+        self.clear_analysis()  # success resolves any prior 'needs you' state
         self.log({"event": "run_finished", "total_cost_usd": self.state["total_cost_usd"]})
 
     def write_report(self, plan: Optional[Plan], code: int, detail: str = "") -> Path:

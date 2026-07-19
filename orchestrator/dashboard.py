@@ -205,8 +205,19 @@ def snapshot(repo, running: bool = False) -> dict:
         "forecast_accuracy": _forecast_accuracy(repo),
         "runs": _project_runs(repo),
         "escalation": _read_escalation(ad),
+        "analysis": _read_analysis(ad),   # Failure Analysis for the 'needs you' state
     })
     return out
+
+
+def _read_analysis(ad: Path):
+    p = ad / "analysis.json"
+    if not p.is_file():
+        return None
+    try:
+        return json.loads(p.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def _memory_count(repo) -> int:
@@ -283,12 +294,15 @@ def step_detail(repo, step_id) -> dict:
     return out
 
 
-def build_run_command(repo, budget, mode: str, constrained: bool = False) -> list:
+def build_run_command(repo, budget, mode: str, constrained: bool = False,
+                      option: str = "") -> list:
     """The `run.py` invocation for a launch. Pure, so it's testable without spawning."""
     cmd = [sys.executable, str(RUN_PY), "--repo", str(repo), "--budget", str(budget)]
     cmd.append("--resume-run" if mode == "resume" else "--fresh")
     if constrained:
         cmd.append("--constrained")
+    if mode == "resume" and option:   # the failure-analysis option the owner picked
+        cmd += ["--option", option]
     return cmd
 
 
@@ -332,7 +346,8 @@ class RunManager:
             p = self._procs.get(str(Path(repo).expanduser().resolve()))
             return p is not None and p.poll() is None
 
-    def launch(self, repo, task, budget, pm_model, dev_model, mode, constrained=False) -> dict:
+    def launch(self, repo, task, budget, pm_model, dev_model, mode, constrained=False,
+               option="") -> dict:
         repo = Path(repo).expanduser().resolve()
         if self.is_running(repo):
             return {"ok": False, "error": "a run is already active for this repo"}
@@ -348,7 +363,7 @@ class RunManager:
             budget = float(budget)
         except (TypeError, ValueError):
             return {"ok": False, "error": "budget must be a number"}
-        cmd = build_run_command(repo, budget, mode, constrained=constrained)
+        cmd = build_run_command(repo, budget, mode, constrained=constrained, option=option)
         env = dict(os.environ)
         if pm_model:
             env["PM_MODEL"] = pm_model
@@ -491,7 +506,8 @@ def _make_handler(manager: RunManager, default_repo: str, default_budget: float)
                     pm_model=(body.get("pm_model") or "").strip(),
                     dev_model=(body.get("dev_model") or "").strip(),
                     mode=body.get("mode", "new"),
-                    constrained=bool(body.get("constrained")))
+                    constrained=bool(body.get("constrained")),
+                    option=(body.get("option") or "").strip())
                 self._json(result, 200 if result.get("ok") else 409)
             elif u.path == "/api/forecast":
                 self._json(compute_forecast(repo, body.get("task", ""),
@@ -679,6 +695,20 @@ h1.page{font-size:15px;font-weight:560;color:var(--mut);letter-spacing:.02em;mar
 .va:last-child{border-bottom:none;} .va .k{color:var(--faint);} .va .v{font-family:var(--mono);}
 .va .v .arw{color:var(--faint);margin:0 6px;}
 .verified{color:var(--good);font-size:12.5px;display:flex;gap:16px;flex-wrap:wrap;margin-top:6px;}
+/* failure analysis — the "needs you" beats, matching the CLI */
+.fa{margin-top:16px;}
+.fa-beat{font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);margin:16px 0 5px;}
+.fa-beat:first-child{margin-top:0;}
+.fa-txt{color:var(--fg);font-size:14px;line-height:1.6;}
+.fa-conf{color:var(--faint);font-weight:400;text-transform:none;letter-spacing:0;}
+.opts{display:flex;flex-direction:column;gap:8px;margin-top:8px;}
+.opt{display:block;border:1px solid var(--line);border-radius:var(--r2);padding:11px 13px;cursor:pointer;transition:.14s var(--ease);}
+.opt:hover{border-color:var(--line-2);background:var(--raise);}
+.opt.rec{border-color:rgba(214,177,106,.32);}
+.opt input{width:auto;margin-right:9px;vertical-align:middle;accent-color:var(--attention);}
+.opt .ol{font-size:13.5px;color:var(--fg);}
+.opt .rtag{font-size:10px;color:var(--attention);border:1px solid rgba(214,177,106,.34);border-radius:999px;padding:1px 7px;margin-left:7px;letter-spacing:.02em;}
+.opt .od{display:block;color:var(--mut);font-size:12.5px;margin:5px 0 0 25px;}
 
 /* activity + toggles */
 .toggle{color:var(--faint);font-size:12px;cursor:pointer;user-select:none;margin-top:12px;display:inline-flex;gap:6px;align-items:center;}
@@ -926,24 +956,57 @@ function nodeLabel(n){return {planner:"Planning",developer:"Writing code",verifi
 
 /* needs-you / paused */
 function viewNeeds(s){
-  const e=s.escalation||{}; const c=s.counts||{};
-  const why=e.reason==="budget_exceeded"?"I reached the budget for this run."
-    : e.reason==="wall_clock_exceeded"?"I hit the time limit for this run."
-    : (e.detail?esc(e.detail.split("\n")[0]):"The run stopped and is waiting for you.");
-  const budgetStop=e.reason==="budget_exceeded";
+  const c=s.counts||{}; const a=s.analysis;
+  if(!a){  // no diagnosis (older run) — a calm, generic paused card
+    const e=s.escalation||{};
+    const why=e.reason==="budget_exceeded"?"I reached the budget for this run."
+      :e.reason==="wall_clock_exceeded"?"I hit the time limit for this run."
+      :(e.detail?esc(e.detail.split("\n")[0]):"The run stopped and is waiting for you.");
+    return `<div class="cols"><div>
+      <div class="hero attn"><div class="state"><span>&#9650; Paused</span><span>${c.done||0} of ${c.total||0} done</span></div>
+        <div class="headline sm">${esc(why)}</div>
+        <div class="actions"><button class="primary" onclick="applyFix(null,'')">Resume</button>
+          <button class="ghost" onclick="loadReport()">See what happened</button></div></div>
+      ${planCard(s)}<div id="activity"></div></div><div>${rail(s)}</div></div>`;
+  }
+  // the same four beats the CLI prints: what happened · why · what I'd do · other options
+  const conf=a.confidence!=null?(a.confidence>=75?`~${a.confidence}% sure`:a.confidence>=45?`~${a.confidence}% sure — worth confirming`:"I'm not certain here"):"";
+  const opts=(a.options||[]);
+  const rec=opts.find(o=>o.recommended)||opts[0];
+  const ordered=rec?[rec].concat(opts.filter(o=>o!==rec)):opts;
+  const radios=ordered.map((o,i)=>`
+    <label class="opt${o.recommended?" rec":""}">
+      <input type="radio" name="fa-opt" value="${esc(o.id)}" data-kind="${esc(o.kind)}" ${i===0?"checked":""}>
+      <span class="ol">${esc(o.label)}${o.recommended?' <span class="rtag">recommended</span>':""}</span>
+      ${o.detail?`<span class="od">${esc(o.detail)}</span>`:""}
+    </label>`).join("");
   return `<div class="cols"><div>
     <div class="hero attn">
-      <div class="state"><span>&#9650; Paused</span><span>${c.done||0} of ${c.total||0} done</span></div>
-      <div class="headline sm">${why}</div>
-      <div class="sub">${(c.done||0)>0?"Everything I've committed so far works and is safe.":"Nothing was lost."}</div>
-      <div class="actions">
-        <button class="primary" onclick="resumeRun(${budgetStop?15:0})">${budgetStop?"Continue (+$15)":"Resume"}</button>
-        <button class="ghost" onclick="loadReport()">See what happened</button>
+      <div class="state"><span>&#9650; I need you for a moment</span><span>${a.step?("paused at step "+esc(a.step)):((c.done||0)+" of "+(c.total||0)+" done")}</span></div>
+      <div class="fa">
+        <div class="fa-beat">What happened</div><div class="fa-txt">${esc(a.summary||"")}</div>
+        <div class="fa-beat">Why it happened${conf?` <span class="fa-conf">(${conf})</span>`:""}</div><div class="fa-txt">${esc(a.root_cause||"")}</div>
+        <div class="fa-beat">What I'd do${opts.length>1?" · or choose another":""}</div>
+        <div class="opts">${radios}</div>
       </div>
+      <div class="actions"><button class="primary" onclick="applyFix()">Continue</button>
+        <button class="ghost" onclick="loadReport()">See what happened</button></div>
     </div>
-    ${planCard(s)}
-    <div id="activity"></div>
+    ${planCard(s)}<div id="activity"></div>
   </div><div>${rail(s)}</div></div>`;
+}
+async function applyFix(forceOpt,forceKind){
+  const s=STATE, a=(s&&s.analysis)||{};
+  let oid=forceOpt, kind=forceKind;
+  if(oid===undefined){ const sel=document.querySelector('input[name="fa-opt"]:checked'); oid=sel?sel.value:null; kind=sel?sel.dataset.kind:""; }
+  if(kind==="abort"){ setHTML($("#app"),`<div class="screen center"><div class="big">Left as-is — the work so far is committed and safe.</div><button class="ghost" onclick="showProjects()">&larr; Projects</button></div>`); return; }
+  let budget=(s&&s.budget_usd)||CFG.default_budget;
+  if(a.reason==="budget_exceeded") budget=budget+15;   // a budget stop needs headroom to continue
+  const body={repo:REPO,budget:budget,mode:"resume"};
+  if(oid) body.option=oid;
+  const {ok,data}=await jpost("/api/run",body);
+  if(!ok||!data.ok){ alert((data&&data.error)||"couldn't resume"); return; }
+  tick();
 }
 
 /* completion report */
