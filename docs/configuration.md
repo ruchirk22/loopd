@@ -109,6 +109,16 @@ All optional; defaults shown.
 The spine records the project's tenancy/isolation strategy (chosen per project) and is hand-editable;
 it survives `--fresh`. See `orchestrator/architecture.py`.
 
+### Program orchestration
+| Variable | Default | Meaning |
+|---|---|---|
+| `PROGRAM_MODEL` | `claude-opus-4-8` | model that decomposes a PRD into epics for `loopd build` |
+| `PROGRAM_MAX_TURNS` | `8` | turns for the one decomposition call |
+
+`loopd build <prd>` (or `@spec.md`) breaks a whole PRD into ordered epics and runs each as a full,
+independently-verified loop, with a governed checkpoint between epics; `loopd build --resume`
+continues. Progress lives in `.agentic/program.json`. See `orchestrator/program.py`.
+
 The dollars/minutes are computed by a **deterministic** estimator (`forecast.WeightedEstimator`)
 from the model's engineering-work estimate — the model never emits money or time. Every finished
 run appends a predicted-vs-actual record to `.agentic/forecasts.jsonl`, and the estimator folds

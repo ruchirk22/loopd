@@ -17,6 +17,11 @@ All notable changes to loopd are documented here. The format follows
 - Verification coverage: the run report and dashboard now show how many acceptance criteria are
   backed by cited evidence (e.g. "7/8 criteria backed by cited evidence") — a measurable read on
   how thoroughly a run was proven.
+- Program orchestration (`loopd build <prd>`): a Program Planner decomposes a whole PRD into
+  ordered epics; each epic runs as a full, independently-verified loop (its own plan, gates, and
+  commits) while sharing the architecture spine and engineering memory, with a governed
+  checkpoint between epics. Resumable epic-by-epic via `.agentic/program.json`
+  (`loopd build --resume`). This is what turns a PRD into a coherent multi-tool app.
 - Architecture spine: before planning, an Architect proposes the binding per-project decisions
   (stack, data model, module boundaries, API conventions, the tenancy/isolation strategy chosen
   for this project, deploy/services, invariants) to `.agentic/architecture.md`; the owner

@@ -19,6 +19,7 @@ rules neither agent can override.
 | `orchestrator/seed.py` | Turns `/handoff`, `--brief`, `--seed-session`, or a task string into `.agentic/brief.md`. |
 | `orchestrator/forecast.py` | Execution Forecast: one cheap model call sizes the work; a deterministic, calibrated estimator turns it into predicted cost/runtime/steps and a recommended budget. Learns from `.agentic/forecasts.jsonl`. |
 | `orchestrator/architecture.py` | Architecture spine: binding per-project decisions (data model, contracts, tenancy/isolation strategy, invariants) the Architect proposes and every planner turn honors. Stored in `.agentic/architecture.md`. |
+| `orchestrator/program.py` | Program orchestration (`loopd build`): decomposes a PRD into ordered epics and runs each as a full, governed loop, sharing the spine + memory. Resumable via `.agentic/program.json`. |
 | `orchestrator/reporter.py` | The run's terminal surface: a live status line on a TTY, plain milestone lines off one, and the end-of-run handover. |
 | `orchestrator/analysis.py` | Failure Analysis: turns a stop into a grounded explanation (summary, root cause, ranked options, recommendation) from the PM's abort directive, or a deterministic fallback. Persisted to `.agentic/analysis.json`; rendered identically by CLI and dashboard. |
 | `orchestrator/github.py` | Optional GitHub enhancement via the `gh` CLI (never handles tokens): issues in (`gh issue view` → brief), PRs out (`gh pr create` with a handover body). Called only from the CLI/dashboard surface — the engine stays GitHub-agnostic. |
@@ -39,6 +40,11 @@ brief ─▶ architecture spine ─▶ forecast ─▶ user decision ─▶ plan
 The architecture spine and forecast run once, after the brief exists and before planning. On
 `--resume-run` they're skipped — the saved spine (`.agentic/architecture.md`) and forecast (and
 any constrained-mode choice) are honored instead.
+
+**At program scale**, `loopd build <prd>` sits one level up: it decomposes the PRD into ordered
+epics and runs the loop above *per epic*, with a governed owner checkpoint at each epic boundary,
+sharing the spine and memory so the epics cohere. Progress is tracked in `.agentic/program.json`
+(resumable with `loopd build --resume`).
 At every terminal outcome the run is *graded*: actuals are diffed against the forecast and the
 record is appended to `.agentic/forecasts.jsonl` to calibrate future estimates.
 

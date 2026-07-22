@@ -83,6 +83,11 @@ class Config:
     architect_model: str = field(default_factory=lambda: _env("ARCHITECT_MODEL", "claude-opus-4-8"))
     architect_max_turns: int = field(default_factory=lambda: int(_env("ARCHITECT_MAX_TURNS", "8")))
 
+    # --- Program orchestration (PRD -> epics -> governed runs; see program.py) ---
+    program_model: str = field(default_factory=lambda: _env("PROGRAM_MODEL", "claude-opus-4-8"))
+    program_max_turns: int = field(default_factory=lambda: int(_env("PROGRAM_MAX_TURNS", "8")))
+    # (program orchestration is invoked with `loopd build`, not a per-run flag)
+
     # --- GitHub (an enhancement via the `gh` CLI; loopd never handles tokens) ---
     github_enabled: bool = field(default_factory=lambda: _env("GITHUB_ENABLED", "1") not in ("0", "false", ""))
     github_auto_pr: bool = field(default_factory=lambda: _env("GITHUB_AUTO_PR", "0") not in ("0", "false", ""))
