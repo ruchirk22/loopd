@@ -1,4 +1,6 @@
 import http.server
+import json
+import re
 import socket
 import sys
 import tempfile
@@ -133,6 +135,129 @@ class TestProbes(unittest.TestCase):
         rc = probe_main(["proc-up", "--start", start, "--ready-log", "UP",
                          "--then", "sleep 10", "--then-timeout", "1", "--timeout", "15"])
         self.assertEqual(rc, 1)
+
+
+class _FlowHandler(http.server.BaseHTTPRequestHandler):
+    """A tiny stateful API: login → token → create goal (auth required) → fetch it."""
+    goals: dict = {}
+    _next = [7]
+
+    def _json(self, code, obj):
+        body = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _read(self):
+        n = int(self.headers.get("Content-Length", 0) or 0)
+        try:
+            return json.loads(self.rfile.read(n) or b"{}")
+        except ValueError:
+            return {}
+
+    def _auth_ok(self):
+        return self.headers.get("Authorization") == "Bearer tok-abc"
+
+    def do_POST(self):
+        if self.path == "/auth/login":
+            return self._json(200, {"token": "tok-abc", "user": "alice"}) \
+                if self._read().get("password") == "pw" else self._json(401, {"error": "bad creds"})
+        if self.path == "/goals":
+            if not self._auth_ok():
+                return self._json(401, {"error": "unauth"})
+            gid = self._next[0]; self._next[0] += 1
+            title = self._read().get("title", "")
+            self.__class__.goals[gid] = title
+            return self._json(201, {"id": gid, "title": title})
+        self._json(404, {"error": "nope"})
+
+    def do_GET(self):
+        m = re.match(r"^/goals/(\d+)$", self.path)
+        if m:
+            if not self._auth_ok():
+                return self._json(401, {"error": "unauth"})
+            gid = int(m.group(1))
+            return self._json(200, {"id": gid, "title": self.__class__.goals[gid]}) \
+                if gid in self.__class__.goals else self._json(404, {"error": "missing"})
+        if self.path == "/plain":
+            body = b"not json"
+            self.send_response(200); self.send_header("Content-Length", str(len(body)))
+            self.end_headers(); self.wfile.write(body)
+            return
+        self._json(404, {"error": "nope"})
+
+    def log_message(self, *a):
+        pass
+
+
+class TestFlowProbe(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _FlowHandler)
+        cls.port = cls.server.server_address[1]
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+        cls.base = f"http://127.0.0.1:{cls.port}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def _flow(self, spec):
+        p = Path(tempfile.mkdtemp()) / "flow.json"
+        p.write_text(json.dumps(spec))
+        return str(p)
+
+    def test_happy_flow_with_capture_and_interpolation(self):
+        f = self._flow({"steps": [
+            {"name": "login", "method": "POST", "path": "/auth/login",
+             "json": {"email": "a@x.com", "password": "pw"},
+             "expect": {"status": 200, "json": {"$.user": "alice"}}, "capture": {"tok": "$.token"}},
+            {"name": "create", "method": "POST", "path": "/goals",
+             "headers": {"Authorization": "Bearer ${tok}"}, "json": {"title": "Q3 OKR"},
+             "expect": {"status": 201, "json": {"$.title": "Q3 OKR"}}, "capture": {"gid": "$.id"}},
+            {"name": "fetch", "method": "GET", "path": "/goals/${gid}",
+             "headers": {"Authorization": "Bearer ${tok}"},
+             "expect": {"status": 200, "body_contains": "Q3 OKR"}},
+        ]})
+        self.assertEqual(probe_main(["flow", "--file", f, "--base-url", self.base]), 0)
+
+    def test_failing_status_assertion(self):
+        f = self._flow({"steps": [{"name": "login-bad", "method": "POST", "path": "/auth/login",
+                                   "json": {"password": "wrong"}, "expect": {"status": 200}}]})
+        self.assertEqual(probe_main(["flow", "--file", f, "--base-url", self.base]), 1)
+
+    def test_failing_json_assertion(self):
+        f = self._flow({"steps": [{"name": "login", "method": "POST", "path": "/auth/login",
+                                   "json": {"password": "pw"},
+                                   "expect": {"status": 200, "json": {"$.user": "bob"}}}]})
+        self.assertEqual(probe_main(["flow", "--file", f, "--base-url", self.base]), 1)
+
+    def test_auth_must_propagate_via_capture(self):
+        # not sending the captured token → /goals is 401, so expecting 201 fails
+        f = self._flow({"steps": [{"name": "create-no-auth", "method": "POST", "path": "/goals",
+                                   "json": {"title": "x"}, "expect": {"status": 201}}]})
+        self.assertEqual(probe_main(["flow", "--file", f, "--base-url", self.base]), 1)
+
+    def test_seed_var_flag(self):
+        f = self._flow({"steps": [{"name": "create", "method": "POST", "path": "/goals",
+                                   "headers": {"Authorization": "Bearer ${tok}"},
+                                   "json": {"title": "seeded"}, "expect": {"status": 201}}]})
+        self.assertEqual(probe_main(["flow", "--file", f, "--base-url", self.base, "--var", "tok=tok-abc"]), 0)
+
+    def test_non_json_response_when_json_expected(self):
+        f = self._flow({"steps": [{"name": "plain", "path": "/plain", "expect": {"json": {"$.x": 1}}}]})
+        self.assertEqual(probe_main(["flow", "--file", f, "--base-url", self.base]), 1)
+
+    def test_missing_json_path_fails(self):
+        f = self._flow({"steps": [{"name": "login", "method": "POST", "path": "/auth/login",
+                                   "json": {"password": "pw"}, "expect": {"json": {"$.nope.deep": 1}}}]})
+        self.assertEqual(probe_main(["flow", "--file", f, "--base-url", self.base]), 1)
+
+    def test_bad_flow_file_is_usage_error(self):
+        self.assertEqual(probe_main(["flow", "--file", "/nonexistent/flow.json"]), 2)
 
 
 if __name__ == "__main__":

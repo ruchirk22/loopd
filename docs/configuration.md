@@ -148,6 +148,7 @@ python3 -m orchestrator.probe docker-build --path . --tag check
 python3 -m orchestrator.probe env-file --path .env.production --requires DATABASE_URL,GCS_BUCKET
 python3 -m orchestrator.probe proc-up --start "npm run preview -- --port 4173" \
     --ready-port 4173 --then "python3 -m orchestrator.probe http --url http://localhost:4173 --expect-status 200"
+python3 -m orchestrator.probe flow --file flow.json --base-url http://localhost:8080
 ```
 
 A long-running check can carry its own timeout: `timeout=900;npm run build`.
@@ -155,3 +156,11 @@ A long-running check can carry its own timeout: `timeout=900;npm run build`.
 `proc-up` waits for readiness (`--ready-log`/`--ready-port`, bounded by `--timeout`), then
 runs each `--then` check. Each `--then` gets its own budget — `--then-timeout <sec>` if set,
 otherwise `--timeout` — so a slow startup can never starve the checks that follow it.
+
+`flow` runs a scripted, multi-step HTTP flow from a JSON file and asserts **every** step — the
+end-to-end behavior a unit test misses (log in → capture a token → create → read it back). The
+flow file is `{"steps": [ ... ]}`; each step supports `method`, `path`, `headers`, `json`/`body`,
+`expect` (`status`, `body_contains`, `json` path→value), and `capture` (JSON path → variable).
+`${var}` interpolates a captured value or an environment variable; `--var K=V` seeds one. It's
+the workhorse for API-behavior gates, and a flow of health GETs against a deployed URL is how
+you smoke-test a deploy.

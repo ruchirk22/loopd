@@ -4,6 +4,14 @@ All notable changes to loopd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and loopd uses
 [semantic versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- `probe flow` — a scripted, multi-step HTTP verification probe (with variable capture and
+  `${var}` interpolation) that asserts an end-to-end behavior a unit test misses: log in →
+  capture a token → create → read it back. The first piece of the "Proof Engine" — deeper,
+  behavior-level gates. Stdlib-only; composes under `proc-up`.
+
 ## [0.1.3] — 2026-07-20
 
 ### Changed

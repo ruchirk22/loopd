@@ -58,10 +58,28 @@ of fragile shell one-liners:
 - `python3 -m orchestrator.probe docker-build --path . --tag check`
 - `python3 -m orchestrator.probe env-file --path .env.production --requires DATABASE_URL,GCS_BUCKET`
 - `python3 -m orchestrator.probe proc-up --start "npm run preview -- --port 4173" --ready-port 4173 --then "python3 -m orchestrator.probe http --url http://localhost:4173 --expect-status 200"`
+- `python3 -m orchestrator.probe flow --file flow.json --base-url http://localhost:8080`
 
 `proc-up` starts a process, waits for readiness, runs the `--then` checks, and always
 tears the process down — use it to prove an app actually boots and serves.
 A long-running command can carry its own timeout: `timeout=900;npm run build`.
+
+`flow` runs a scripted, multi-step HTTP flow and asserts EACH step — the behavior a unit
+test misses and a browser is overkill for (log in, capture a token, use it, read the result
+back). This is the strongest gate for "does this feature actually work end-to-end?" Prefer it
+over a bare unit test whenever a step changes API or request-handling behavior. A flow of
+health GETs against a deployed URL is also how you smoke-test a deploy. The flow file is
+`{"steps": [ ... ]}`, each step:
+
+```
+{"name": "create goal", "method": "POST", "path": "/goals",
+ "headers": {"Authorization": "Bearer ${tok}"}, "json": {"title": "Q3"},
+ "expect": {"status": 201, "body_contains": "Q3", "json": {"$.title": "Q3"}},
+ "capture": {"gid": "$.id"}}
+```
+
+`${var}` interpolates a captured value (or an env var); `capture` extracts a JSON path into a
+variable for later steps. Compose it under `proc-up --then` so the app is up when it runs.
 
 ## Project memory
 
