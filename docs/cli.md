@@ -4,8 +4,8 @@ The single source of truth for every `loopd` command. For a guided walkthrough s
 [usage.md](usage.md).
 
 loopd is an autonomous engineering runtime that only ships changes it can prove: it **plans,
-forecasts, builds, verifies, recovers, remembers, and delivers** engineering work. You mostly
-think about one thing — *what you want built* — and run one command.
+forecasts, builds, verifies, scores its own confidence, recovers, remembers, and delivers**
+engineering work. You mostly think about one thing — *what you want built* — and run one command.
 
 ## Install the `loopd` command
 
@@ -35,6 +35,7 @@ alias loopd="python3 /path/to/loopd/loopd"     # add to ~/.zshrc / ~/.bashrc
 |---|---|
 | `loopd "<what to build>"` | Build it in the current project — forecast, decide, build, verify, deliver. |
 | `loopd path/to/spec.md` | Build from a markdown spec file. |
+| `loopd build <prd>` / `loopd build @prd.md` | Break a whole PRD into ordered epics and build them as governed, independently-verified runs. `loopd build --resume` continues epic-by-epic. |
 | `loopd new "<idea>"` | Start a brand-new project from scratch in the current folder (sets up git). |
 | `loopd clone <url> ["<task>"]` | Clone a repo, then optionally start building in it. |
 | `loopd resume` | Continue the paused run. If loopd stopped with a blocker, it shows the diagnosis and lets you pick one option (`--yes` for the recommended, `--option <id>` for a specific one). |

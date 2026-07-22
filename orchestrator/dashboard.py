@@ -138,6 +138,28 @@ def _gate_stats(events):
     return passed, len(g)
 
 
+def _read_confidence(ad):
+    """The persisted Delivery Confidence report, or None (written once the run ends)."""
+    p = ad / "confidence.json"
+    if not p.is_file():
+        return None
+    try:
+        return json.loads(p.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _coverage(steps):
+    """Verification coverage over DONE steps: acceptance criteria backed by cited evidence."""
+    ev = tot = 0
+    for s in steps:
+        if s.get("status") == "done":
+            n = len(s.get("acceptance_criteria") or [])
+            tot += n
+            ev += min(n, sum(1 for e in (s.get("criteria_evidence") or []) if e.get("satisfied")))
+    return {"evidenced": ev, "total": tot}
+
+
 def snapshot(repo, running: bool = False) -> dict:
     repo = Path(repo).expanduser().resolve()
     ad = repo / ".agentic"
@@ -205,11 +227,13 @@ def snapshot(repo, running: bool = False) -> dict:
             "attempts": sum(s.get("attempts", 0) for s in steps),
             "gate_pass": gate_pass, "gate_total": gate_total,
         },
+        "verification_coverage": _coverage(steps),
         "timeline": _timeline(events),
         "has_report": (ad / "report.md").is_file(),
         "has_escalation": (ad / "escalation.json").is_file(),
         "has_memory": (ad / "memory.md").is_file(),
         "forecast": st.get("forecast"),  # predicted (+ 'actual' once the run ends)
+        "confidence": _read_confidence(ad),  # delivery-confidence report (once the run ends)
         # Workspace framing — the project has an identity, not just a run.
         "name": repo.name,
         "health": workspace.health(repo),
@@ -932,6 +956,9 @@ function appSig(s,k){
 function patchLive(s){
   const e=document.getElementById("live-elapsed"); if(e)e.textContent=dur(s.elapsed_s);
   const c=document.getElementById("live-cost"); if(c)c.textContent=money(s.total_cost_usd);
+  const sp=document.getElementById("live-spend");
+  if(sp){ const f=s.forecast||{}; const b=(f.chosen_budget_usd||s.budget_usd||0);
+    sp.style.width=(b?Math.min(100,100*((s.total_cost_usd||0)/b)):0)+"%"; }
 }
 
 /* rail (shared) */
@@ -1017,12 +1044,21 @@ function viewActive(s){
       <div class="sub">${node?esc(node)+"…":""}</div>
       <div class="bar"><span style="width:${pct}%"></span></div>
       <div class="metaline"><span>elapsed <span id="live-elapsed">${dur(s.elapsed_s)}</span></span><span><span id="live-cost">${money(s.total_cost_usd)}</span> of ${money(budget)}</span></div>
+      ${budget?`<div class="bar thin" title="spend vs budget${fmark!=null?" (marker = forecast)":""}">
+        <span id="live-spend" style="width:${spentPct}%"></span>${fmark!=null?`<span class="fmark" style="left:${fmark}%"></span>`:""}</div>`:""}
       <div class="quote">&ldquo;I've got it from here. Close this any time — nothing is lost.&rdquo;</div>
     </div>
     ${planCard(s)}
-    <div class="toggle" onclick="toggleActivity()">&#9662; Activity — timeline &amp; console</div>
+    ${liveActivity(s)}
+    <div class="toggle" onclick="toggleActivity()">&#9662; Activity — full timeline &amp; console</div>
     <div id="activity"></div>
   </div><div>${rail(s)}</div></div>`;
+}
+function liveActivity(s){
+  const tl=(s.timeline||[]).slice(-4).reverse();
+  if(!tl.length) return "";
+  const rows=tl.map(e=>`<div class="ev"><span class="t">${tfmt(e.ts)}</span><span>${esc(e.text)}</span></div>`).join("");
+  return `<div class="card livefeed"><h3>Latest</h3><div class="tl">${rows}</div></div>`;
 }
 function planCard(s){
   const c=s.counts||{}; const steps=s.steps||[];
@@ -1098,6 +1134,15 @@ function viewReport(s){
   const f=s.forecast||{}; const a=f.actual||{}; const c=s.counts||{};
   const task=(s.task||"").split("\n")[0];
   const acc=(f.estimated_cost_usd!=null&&a.cost_usd!=null)?accuracyPct(f,a):null;
+  const cov=s.verification_coverage||{};
+  const covLine=cov.total?` &nbsp;&nbsp; &#10003; ${cov.evidenced}/${cov.total} criteria backed by evidence`:"";
+  const cf=s.confidence||null;
+  const confBadge=(cf&&cf.score!=null)?` &nbsp;&nbsp; &#10003; ${cf.score}% delivery confidence (${cf.band})`:"";
+  const confCard=(cf&&cf.score!=null)?`<div class="card"><h3>Delivery confidence</h3>
+      <div style="font-size:30px;font-weight:700;color:${cf.meets_bar?'var(--good)':'var(--fg)'}">${cf.score}%
+        <span style="font-size:14px;font-weight:600;color:var(--mut)">${esc(cf.band)}${cf.meets_bar?" &middot; meets the &gt;75% bar":""}</span></div>
+      ${(cf.factors||[]).map(x=>`<div class="va"><span class="k">${esc(x.label||x.key||"")}</span><span class="v">${Math.round((x.value||0)*100)}%</span></div>`).join("")}
+    </div>`:"";
   const vt=`<div class="tiles">
     <div class="card"><h3>Forecast vs actual</h3>
       ${vaRow("cost",money(f.estimated_cost_usd),money(a.cost_usd))}
@@ -1105,6 +1150,7 @@ function viewReport(s){
       ${vaRow("steps",f.estimated_steps,(a.steps_done!=null?a.steps_done:c.done))}
       ${acc!=null?`<div class="va"><span class="k">accuracy</span><span class="v">${acc}%</span></div>`:""}
     </div>
+    ${confCard}
     <div class="card"><h3>Pull request</h3>
       <div style="color:var(--mut);font-size:13px">Branch <span style="font-family:var(--mono);color:var(--fg)">${esc(s.branch||"")}</span> is ready to review.</div>
       <div class="actions" style="margin-top:12px"><button class="primary" onclick="openPr()">Open pull request</button></div>
@@ -1121,7 +1167,7 @@ function viewReport(s){
       <div class="state"><span>&#10003; Delivered</span><span>${dur(s.elapsed_s)} &middot; ${money(s.total_cost_usd)}</span></div>
       <div class="headline">loopd finished the work.</div>
       <div class="sub">${task?esc(task):"See the summary below."}</div>
-      <div class="verified">&#10003; every step's checks &nbsp;&nbsp; &#10003; full replay in a clean checkout</div>
+      <div class="verified">&#10003; every step's checks &nbsp;&nbsp; &#10003; full replay in a clean checkout${covLine}${confBadge}</div>
     </div>
     ${vt}
     <div class="actions"><button class="primary" onclick="freshObjective()">Start another objective</button>

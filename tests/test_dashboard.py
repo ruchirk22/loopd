@@ -28,7 +28,9 @@ def repo_with_run():
     led.spend(3.25)
     step = Step(id="1", goal="add widget", acceptance_criteria=["renders", "has a test"],
                 verify=["pytest -q"], status="done", commit_sha="abcdef1234", cost_usd=3.25,
-                attempts=2, dev_summary="added widget.py and a test")
+                attempts=2, dev_summary="added widget.py and a test",
+                criteria_evidence=[{"criterion": "renders", "satisfied": True, "evidence": "ok"},
+                                   {"criterion": "has a test", "satisfied": True, "evidence": "ok"}])
     pending = Step(id="2", goal="wire it up", acceptance_criteria=["b"], verify=["true"])
     led.save_plan(Plan(summary="do it", steps=[step, pending]))
     led.log({"event": "gates", "step": "1", "passed": True})
@@ -55,6 +57,11 @@ class TestSnapshot(unittest.TestCase):
         self.assertEqual(s["metrics"]["gate_total"], 1)
         self.assertIn(s["active_node"], ("planner", "developer", "verification", "review", "decision", "done"))
         self.assertTrue(any("accepted" in ev["text"] for ev in s["timeline"]))
+
+    def test_snapshot_reports_verification_coverage(self):
+        s = dashboard.snapshot(repo_with_run(), running=True)
+        # step 1 is done with 2 criteria, both evidenced; step 2 is pending → not counted
+        self.assertEqual(s["verification_coverage"], {"evidenced": 2, "total": 2})
 
     def test_snapshot_freezes_elapsed_when_finished(self):
         # A finished run must report a frozen elapsed (end - start), not an ever-growing clock,

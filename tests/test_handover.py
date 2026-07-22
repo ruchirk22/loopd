@@ -78,6 +78,33 @@ class TestHandover(unittest.TestCase):
         self.assertIn("timed out", ho.text)
         self.assertIn("(no developer output)", ho.text)
 
+    # --- C3: advisory verification-depth flags (never high_risk) ---
+    def test_weak_verification_flag_on_new_route_with_unit_only_gate(self):
+        (self.repo / "app.py").write_text("x = 1\n@app.route('/goals')\ndef goals(): return 'ok'\n")
+        ho = build_handover(self.step(verify=["pytest -q"]), dev_result(), True, "log",
+                            self.ledger, self.cfg)
+        self.assertTrue(any("WEAK_VERIFICATION" in f for f in ho.flags))
+        self.assertFalse(ho.high_risk)  # advisory only — must not force integrity_ack
+
+    def test_weak_verification_suppressed_with_flow_gate(self):
+        (self.repo / "app.py").write_text("x = 1\n@app.route('/goals')\ndef goals(): return 'ok'\n")
+        v = ["python3 -m orchestrator.probe flow --file flow.json --base-url http://localhost:8080"]
+        ho = build_handover(self.step(verify=v), dev_result(), True, "log", self.ledger, self.cfg)
+        self.assertFalse(any("WEAK_VERIFICATION" in f for f in ho.flags))
+
+    def test_weak_isolation_flag_on_tenant_data(self):
+        (self.repo / "app.py").write_text("x = 1\nrows = q.filter(Goal.tenant_id == tid)\n")
+        ho = build_handover(self.step(verify=["pytest -q"]), dev_result(), True, "log",
+                            self.ledger, self.cfg)
+        self.assertTrue(any("WEAK_ISOLATION" in f for f in ho.flags))
+        self.assertFalse(ho.high_risk)
+
+    def test_weak_isolation_suppressed_with_isolation_gate(self):
+        (self.repo / "app.py").write_text("x = 1\nrows = q.filter(Goal.tenant_id == tid)\n")
+        v = ["python3 -m orchestrator.probe isolation --file iso.json --base-url http://x"]
+        ho = build_handover(self.step(verify=v), dev_result(), True, "log", self.ledger, self.cfg)
+        self.assertFalse(any("WEAK_ISOLATION" in f for f in ho.flags))
+
 
 if __name__ == "__main__":
     unittest.main()

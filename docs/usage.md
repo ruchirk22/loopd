@@ -266,7 +266,8 @@ cat ../my-app/.agentic/report.md
 ```
 
 It shows the outcome, per-step status/attempts/cost, the commits made, anything descoped,
-and — on failure — why it stopped. Then inspect the work itself:
+the verification coverage, the **Delivery Confidence** score, and — on failure — why it
+stopped. Then inspect the work itself:
 
 ```bash
 cd ../my-app
@@ -280,6 +281,43 @@ touched. To keep the work:
 ```bash
 git checkout main && git merge agentic/run-<timestamp>
 ```
+
+### Delivery Confidence
+
+At the end of every run loopd prints a **Delivery Confidence** card — a grounded 0–100 answer to
+the one question a cost forecast can't: *how confident should you be that this run actually
+delivered what was asked, correctly?*
+
+```
+  ┌─────────────────────────────────────────────┐
+  │             DELIVERY CONFIDENCE             │
+  └─────────────────────────────────────────────┘
+
+  Score              84%   ██████████████████░░░░
+  Band               High   ✓ meets the >75% bar
+
+  Factors (weighted):
+    Evidence coverage    75%   3/4 criteria backed by cited evidence
+    Scope delivered      75%   3/4 steps delivered (1 descoped/unfinished)
+    Final verification  100%   pristine-checkout replay passed
+    Verification depth   83%   2/3 steps prove behavior (flow/http/isolation/e2e)
+    Stability            89%   0 rejection(s) + 1 replan(s) across 3 step(s)
+    Integrity           100%   no high-risk accepts
+```
+
+It is **deterministic — no model call.** It reads the same ground truth the review loop already
+commits: which acceptance criteria are backed by cited evidence, how much scope was delivered vs
+descoped, whether the passing gates prove *behavior* (probe flow / http / isolation, e2e) or only
+assert units, whether the pristine-checkout replay passed, churn, and integrity. The score is
+banded, and the **High band (default 75%) is the bar** — the answer to "can I trust this delivery?"
+It is written to `.agentic/confidence.json`, and every run appends a calibratable record to
+`.agentic/confidence.jsonl`.
+
+Right after the plan is authored (before any budget is spent), loopd also prints a **plan
+confidence ceiling** — the most a perfect execution of *this plan* could prove. A low ceiling is a
+warning that the plan is under-verified (unit-only where behavior gates are needed); raise it by
+having the planner add behavior/isolation gates. Tune the weights and the bar with `CONFIDENCE_*`
+(see [configuration](configuration.md#delivery-confidence)); disable with `CONFIDENCE_ENABLED=0`.
 
 ### Exit codes
 

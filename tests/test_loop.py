@@ -96,6 +96,7 @@ class LoopTestBase(unittest.TestCase):
         (repo / "app.txt").write_text("v1\n")
         self.cfg = Config(repo=repo)
         self.cfg.forecast_enabled = False  # control-plane tests; forecast covered in test_forecast.py
+        self.cfg.architecture_enabled = False  # spine covered in test_architecture.py
         (self.cfg.state_dir / "brief.md").write_text("# Task brief\n\n## Objective\nmake hello.txt\n")
 
     def patch_agents(self, pm_script, dev_script):
@@ -568,6 +569,69 @@ class TestFailureAnalysisInLoop(LoopTestBase):
         rc = loop.run(None, self.cfg)
         self.assertEqual(rc, 0)
         self.assertIsNone(analysis.load(self.cfg.repo))  # cleared on success
+
+
+ARCH_PROPOSAL = {
+    "stack": ["Python", "FastAPI", "Postgres"],
+    "data_model": ["User", "Goal (owner = User)"],
+    "module_boundaries": ["api/", "core/"],
+    "api_conventions": ["REST /v1"],
+    "tenancy": {"strategy": "rls", "details": "every table has tenant_id; RLS enforces it"},
+    "deploy": ["Cloud Run"], "conventions": ["pytest"], "invariants": ["no client tenant_id"],
+}
+
+
+class TestArchitectureInLoop(LoopTestBase):
+    """The Architect proposes a binding spine before planning; non-interactively it's accepted,
+    persisted, and injected into the planner's seed."""
+
+    def _enable_arch(self):
+        self.cfg.architecture_enabled = True
+        self.cfg.force = True   # non-interactive auto-accept
+        from orchestrator import architecture
+        fake = lambda *a, **k: ok_result(ARCH_PROPOSAL, None, cost=0.05)
+        p = mock.patch.object(architecture, "run_claude", fake)
+        p.start(); self.addCleanup(p.stop)
+
+    def _happy(self):
+        self.patch_agents(
+            pm_script=[
+                ("Create the plan", plan_directive(["test -f hello.txt"])),
+                ("Author the developer's instructions", DISPATCH),
+                ("Review the developer's handover", ACCEPT),
+                ("All planned steps are accepted",
+                 {"verdict": "task_complete", "reasoning": "done",
+                  "final_verify": ["test -f hello.txt"]}),
+            ],
+            dev_script=[("Create hello.txt", dev_writes_hello())],
+        )
+
+    def test_spine_established_and_injected(self):
+        self._enable_arch()
+        self._happy()
+        rc = loop.run(None, self.cfg)
+        self.assertEqual(rc, 0)
+        from orchestrator import architecture
+        self.assertTrue(architecture.exists(self.cfg.repo))
+        self.assertEqual(architecture.tenancy_strategy(self.cfg.repo), "rls")
+        # the binding spine reached the planner's first prompt
+        self.assertIn("Architecture (BINDING", self.fake_pm.calls[0]["prompt"])
+        self.assertIn("Strategy: rls", self.fake_pm.calls[0]["prompt"])
+
+    def test_existing_spine_is_not_reproposed(self):
+        from orchestrator import architecture
+        architecture.save(self.cfg.repo, architecture.from_proposal(ARCH_PROPOSAL))
+        self.cfg.architecture_enabled = True
+        calls = {"n": 0}
+        def counting(*a, **k):
+            calls["n"] += 1
+            return ok_result(ARCH_PROPOSAL, None, cost=0.05)
+        p = mock.patch.object(architecture, "run_claude", counting)
+        p.start(); self.addCleanup(p.stop)
+        self._happy()
+        loop.run(None, self.cfg)
+        self.assertEqual(calls["n"], 0)   # a spine already existed → no proposal call
+        self.assertIn("Architecture (BINDING", self.fake_pm.calls[0]["prompt"])
 
 
 if __name__ == "__main__":

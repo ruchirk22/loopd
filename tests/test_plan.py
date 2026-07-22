@@ -143,5 +143,29 @@ class TestMutations(unittest.TestCase):
         self.assertEqual([w for w in validate(p) if "verify" in w], [])
 
 
+class TestVerificationCoverage(unittest.TestCase):
+    def test_coverage_counts_only_satisfied_evidence_on_done_steps(self):
+        s1 = Step(id="1", goal="g", acceptance_criteria=["a", "b"], verify=["true"], status=DONE,
+                  criteria_evidence=[{"criterion": "a", "satisfied": True, "evidence": "x"},
+                                     {"criterion": "b", "satisfied": True, "evidence": "y"}])
+        s2 = Step(id="2", goal="g", acceptance_criteria=["c"], verify=["true"], status=DONE,
+                  criteria_evidence=[{"criterion": "c", "satisfied": False}])
+        s3 = Step(id="3", goal="g", acceptance_criteria=["d"], verify=["true"])  # pending → ignored
+        self.assertEqual(Plan(steps=[s1, s2, s3]).verification_coverage(), (2, 3))
+
+    def test_coverage_clamps_excess_evidence(self):
+        s = Step(id="1", goal="g", acceptance_criteria=["a"], verify=["true"], status=DONE,
+                 criteria_evidence=[{"criterion": "a", "satisfied": True},
+                                    {"criterion": "a", "satisfied": True}])  # duplicate
+        self.assertEqual(Plan(steps=[s]).verification_coverage(), (1, 1))
+
+    def test_criteria_evidence_survives_serialization(self):
+        s = Step(id="1", goal="g", acceptance_criteria=["a"], verify=["true"], status=DONE,
+                 criteria_evidence=[{"criterion": "a", "satisfied": True}])
+        restored = Plan.from_dict(Plan(steps=[s]).to_dict())
+        self.assertEqual(restored.steps[0].criteria_evidence, [{"criterion": "a", "satisfied": True}])
+        self.assertEqual(restored.verification_coverage(), (1, 1))
+
+
 if __name__ == "__main__":
     unittest.main()

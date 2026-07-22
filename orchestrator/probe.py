@@ -17,7 +17,9 @@ open port), runs the --then commands, and ALWAYS tears the process group down.
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -26,6 +28,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 
 def _killpg(pid: int, wait: "subprocess.Popen | None" = None) -> None:
@@ -211,6 +214,224 @@ def probe_proc_up(args) -> int:
         teardown()
 
 
+_VAR = re.compile(r"\$\{([A-Za-z0-9_]+)\}")
+
+
+def _interp(s: str, variables: dict) -> str:
+    """Replace ${name} with a captured variable, falling back to the environment (handy for
+    tokens seeded via --var or exported by a prior setup step). Unknown names are left as-is."""
+    def repl(m):
+        key = m.group(1)
+        if key in variables:
+            return str(variables[key])
+        return os.environ.get(key, m.group(0))
+    return _VAR.sub(repl, s)
+
+
+def _interp_obj(obj, variables: dict):
+    """Interpolate ${name} through a JSON value. A string that is EXACTLY ${name} takes the
+    variable's real type (so a captured int/bool stays an int/bool, not a string)."""
+    if isinstance(obj, str):
+        m = _VAR.fullmatch(obj)
+        if m and m.group(1) in variables:
+            return variables[m.group(1)]
+        return _interp(obj, variables)
+    if isinstance(obj, dict):
+        return {k: _interp_obj(v, variables) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_interp_obj(v, variables) for v in obj]
+    return obj
+
+
+def _jget(obj, path: str):
+    """Minimal JSON accessor: `$.a.b[0].c` (leading `$`/`.` optional). Raises KeyError/
+    IndexError/TypeError when the path doesn't resolve — the caller turns that into a fail."""
+    p = path.strip()
+    if p.startswith("$"):
+        p = p[1:]
+    cur = obj
+    for tok in re.findall(r"[^.\[\]]+|\[\d+\]", p):
+        if tok.startswith("["):
+            cur = cur[int(tok[1:-1])]          # IndexError/TypeError if not a list
+        else:
+            cur = cur[tok]                     # KeyError/TypeError if not a dict
+    return cur
+
+
+def _flow_request(url, method, headers, data, timeout, interval):
+    """One request, retrying only connection errors up to `timeout` (tolerates a just-booted
+    app). A real HTTP response — including 4xx/5xx — is returned immediately to be asserted."""
+    deadline = time.time() + max(1, timeout)
+    last = "no attempt made"
+    opener = urllib.request.build_opener(_NoRedirect)  # assert the first response, not a 3xx target
+    while time.time() < deadline:
+        try:
+            req = urllib.request.Request(url, data=data, method=method, headers=headers)
+            with opener.open(req, timeout=min(15, max(1, timeout))) as resp:
+                return resp.status, resp.read(1_000_000).decode("utf-8", errors="replace"), None
+        except urllib.error.HTTPError as e:
+            body = (e.read(1_000_000) or b"").decode("utf-8", errors="replace")
+            e.close()
+            return e.code, body, None
+        except (urllib.error.URLError, OSError, TimeoutError) as e:
+            last = f"connection failed: {e}"
+            time.sleep(interval)
+    return None, "", f"{last} (after {timeout}s)"
+
+
+def probe_flow(args) -> int:
+    """Run a scripted, multi-step HTTP flow from a JSON file and assert each step. This is the
+    behavior gate unit tests miss and a browser is overkill for: log in, capture a token, use
+    it, read the result back, assert. A flow of health GETs against a deployed URL is also how
+    you smoke-test a deploy."""
+    try:
+        spec = json.loads(Path(args.file).read_text())
+    except (OSError, ValueError) as e:
+        print(f"PROBE FAIL: cannot read flow file {args.file!r}: {e}")
+        return 2
+    steps = spec.get("steps") if isinstance(spec, dict) else None
+    if not isinstance(steps, list) or not steps:
+        print("PROBE FAIL: flow file must be an object with a non-empty 'steps' array")
+        return 2
+
+    variables: dict = {}
+    for kv in args.var:
+        k, _, v = kv.partition("=")
+        variables[k.strip()] = v
+
+    base = (args.base_url or "").rstrip("/")
+    for i, st in enumerate(steps):
+        name = st.get("name") or f"step {i + 1}"
+        method = str(st.get("method", "GET")).upper()
+        path = _interp(str(st.get("path", "")), variables)
+        url = (base + path) if (base and path.startswith("/")) else (base + path if base else path)
+        headers = {k: _interp(str(v), variables) for k, v in (st.get("headers") or {}).items()}
+        data = None
+        if st.get("json") is not None:
+            data = json.dumps(_interp_obj(st["json"], variables)).encode()
+            headers.setdefault("Content-Type", "application/json")
+        elif st.get("body") is not None:
+            data = _interp(str(st["body"]), variables).encode()
+
+        status, body, err = _flow_request(url, method, headers, data, args.timeout, args.interval)
+        if err:
+            return _fail(f"flow step {name!r} ({method} {url}): {err}")
+
+        exp = st.get("expect") or {}
+        if "status" in exp and status != exp["status"]:
+            return _fail(f"flow step {name!r}: status {status} != expected {exp['status']} "
+                         f"(body: {body[:200]!r})")
+        if exp.get("body_contains") and exp["body_contains"] not in body:
+            return _fail(f"flow step {name!r}: body does not contain {exp['body_contains']!r} "
+                         f"(body: {body[:200]!r})")
+
+        parsed, need_json = None, ("json" in exp) or bool(st.get("capture"))
+        if need_json:
+            try:
+                parsed = json.loads(body)
+            except ValueError:
+                return _fail(f"flow step {name!r}: expected a JSON response for its "
+                             f"assertions/captures, got (body: {body[:200]!r})")
+        for jp, expected in (exp.get("json") or {}).items():
+            try:
+                actual = _jget(parsed, jp)
+            except (KeyError, IndexError, TypeError):
+                return _fail(f"flow step {name!r}: json path {jp} not found (body: {body[:200]!r})")
+            if actual != expected:
+                return _fail(f"flow step {name!r}: {jp} = {actual!r} != expected {expected!r}")
+        for var, jp in (st.get("capture") or {}).items():
+            try:
+                variables[var] = _jget(parsed, jp)
+            except (KeyError, IndexError, TypeError):
+                return _fail(f"flow step {name!r}: cannot capture {var!r} from {jp} "
+                             f"(body: {body[:200]!r})")
+
+    return _ok(f"flow {Path(args.file).name!r}: all {len(steps)} step(s) passed")
+
+
+def probe_isolation(args) -> int:
+    """Prove tenant/user boundaries hold: each resource's OWNER can read it, every OTHER
+    identity (and, by default, an unauthenticated caller) is denied, and — the check that
+    catches the classic bug — the owner's data never leaks into anyone else's response.
+
+    This is the multi-tenant safety gate: data-isolation failures are how multi-tenant apps
+    leak, and they're invisible to unit tests."""
+    try:
+        spec = json.loads(Path(args.file).read_text())
+    except (OSError, ValueError) as e:
+        print(f"PROBE FAIL: cannot read isolation file {args.file!r}: {e}")
+        return 2
+    identities = spec.get("identities") if isinstance(spec, dict) else None
+    resources = spec.get("resources") if isinstance(spec, dict) else None
+    if not isinstance(identities, dict) or not identities or not isinstance(resources, list) or not resources:
+        print("PROBE FAIL: isolation file needs a non-empty 'identities' object and 'resources' array")
+        return 2
+    for name, ident in identities.items():
+        if not isinstance(ident, dict) or "header" not in ident or "value" not in ident:
+            print(f"PROBE FAIL: identity {name!r} must be {{\"header\": ..., \"value\": ...}}")
+            return 2
+
+    variables: dict = {}
+    for kv in args.var:
+        k, _, v = kv.partition("=")
+        variables[k.strip()] = v
+    base = (args.base_url or "").rstrip("/")
+    default_deny = spec.get("deny_status") or [401, 403, 404]
+    checks = 0
+
+    def _headers(ident):
+        h = {} if ident is None else {ident["header"]: _interp(str(ident["value"]), variables)}
+        return h
+
+    for r in resources:
+        owner = r.get("owner")
+        if owner not in identities:
+            return _fail(f"isolation: resource owner {owner!r} is not one of the identities")
+        method = str(r.get("method", "GET")).upper()
+        path = _interp(str(r.get("url") or r.get("path") or ""), variables)
+        url = (base + path) if (base and path.startswith("/")) else (base + path if base else path)
+        marker = r.get("leak_marker")
+        deny = r.get("deny_status") or default_deny
+        data, ct = None, {}
+        if r.get("json") is not None:
+            data = json.dumps(_interp_obj(r["json"], variables)).encode()
+            ct = {"Content-Type": "application/json"}
+
+        # 1) The owner MUST be allowed (and actually see their data).
+        st, body, err = _flow_request(url, method, {**ct, **_headers(identities[owner])},
+                                      data, args.timeout, args.interval)
+        if err:
+            return _fail(f"isolation: owner {owner!r} request failed for {method} {url}: {err}")
+        if not 200 <= (st or 0) < 300:
+            return _fail(f"isolation: owner {owner!r} was denied its OWN resource {method} {url} "
+                         f"(status {st}) — the fixture or auth is wrong")
+        if marker and marker not in body:
+            return _fail(f"isolation: owner {owner!r} read {method} {url} but the expected "
+                         f"leak_marker {marker!r} wasn't there — check the fixture (body: {body[:160]!r})")
+        checks += 1
+
+        # 2) Every OTHER identity, and an unauthenticated caller, MUST be denied and MUST NOT
+        #    receive the owner's data.
+        others = [(n, identities[n]) for n in identities if n != owner]
+        if not args.no_unauth_check:
+            others.append(("<unauthenticated>", None))
+        for name, ident in others:
+            st, body, err = _flow_request(url, method, {**ct, **_headers(ident)},
+                                          data, args.timeout, args.interval)
+            if err:
+                return _fail(f"isolation: {name!r} request failed for {method} {url}: {err}")
+            if marker and marker in body:
+                return _fail(f"CROSS-TENANT LEAK: {name!r} received {owner!r}'s data at {method} {url} "
+                             f"(found {marker!r}, status {st})")
+            if st not in deny:
+                return _fail(f"isolation: {name!r} was NOT denied {owner!r}'s resource {method} {url} "
+                             f"(status {st}, expected one of {deny})")
+            checks += 1
+
+    return _ok(f"isolation {Path(args.file).name!r}: {len(resources)} resource(s), "
+               f"{checks} boundary check(s) held")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="python3 -m orchestrator.probe",
                                  description="Deterministic verification probes (exit 0 = pass).")
@@ -257,6 +478,26 @@ def main(argv=None) -> int:
     p.add_argument("--then-timeout", type=int, default=0, help="separate timeout for each --then check (0 = use --timeout)")
     p.add_argument("--interval", type=float, default=0.5)
     p.set_defaults(fn=probe_proc_up)
+
+    p = sub.add_parser("flow", help="run a scripted multi-step HTTP flow (with capture) and assert each step")
+    p.add_argument("--file", required=True, help="JSON flow file: {\"steps\": [ {method,path,headers,json,expect,capture}, ... ]}")
+    p.add_argument("--base-url", default="", help="prepended to each step's path")
+    p.add_argument("--var", action="append", default=[], metavar="K=V",
+                   help="seed a variable usable as ${K} (repeatable); ${NAME} also falls back to the environment")
+    p.add_argument("--timeout", type=int, default=30, help="per-request connection-retry window (seconds)")
+    p.add_argument("--interval", type=float, default=0.5)
+    p.set_defaults(fn=probe_flow)
+
+    p = sub.add_parser("isolation", help="prove tenant/user boundaries: owner allowed, others denied, no data leak")
+    p.add_argument("--file", required=True,
+                   help="JSON: {identities:{name:{header,value}}, resources:[{owner,url,leak_marker,method,json,deny_status}]}")
+    p.add_argument("--base-url", default="", help="prepended to each resource's url")
+    p.add_argument("--var", action="append", default=[], metavar="K=V",
+                   help="seed a variable usable as ${K} (repeatable); ${NAME} also falls back to the environment")
+    p.add_argument("--no-unauth-check", action="store_true", help="skip the unauthenticated-access check")
+    p.add_argument("--timeout", type=int, default=30, help="per-request connection-retry window (seconds)")
+    p.add_argument("--interval", type=float, default=0.5)
+    p.set_defaults(fn=probe_isolation)
 
     args = ap.parse_args(argv)
     return args.fn(args)

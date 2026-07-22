@@ -99,6 +99,43 @@ All optional; defaults shown.
 | `FORECAST_MAX_TURNS` | `6` | lets the estimator shallow-skim the repo, not read everything |
 | `FORECAST_<COEFFICIENT>` | (see `forecast.EstimatorConfig`) | every estimator coefficient is overridable, e.g. `FORECAST_COST_PER_DEV_CALL_USD`, `FORECAST_BASE_CONTINGENCY` |
 
+### Architecture spine
+| Variable | Default | Meaning |
+|---|---|---|
+| `ARCHITECTURE_ENABLED` | `1` | before planning, an Architect proposes binding per-project decisions to `.agentic/architecture.md` (owner-approved) that every step honors; `0` disables it |
+| `ARCHITECT_MODEL` | `claude-opus-4-8` | model for the one-time architecture proposal (load-bearing, so the capable model) |
+| `ARCHITECT_MAX_TURNS` | `8` | lets the Architect skim the repo, not read everything |
+
+The spine records the project's tenancy/isolation strategy (chosen per project) and is hand-editable;
+it survives `--fresh`. See `orchestrator/architecture.py`.
+
+### Program orchestration
+| Variable | Default | Meaning |
+|---|---|---|
+| `PROGRAM_MODEL` | `claude-opus-4-8` | model that decomposes a PRD into epics for `loopd build` |
+| `PROGRAM_MAX_TURNS` | `8` | turns for the one decomposition call |
+
+`loopd build <prd>` (or `@spec.md`) breaks a whole PRD into ordered epics and runs each as a full,
+independently-verified loop, with a governed checkpoint between epics; `loopd build --resume`
+continues. Progress lives in `.agentic/program.json`. See `orchestrator/program.py`.
+
+### Delivery Confidence
+| Variable | Default | Meaning |
+|---|---|---|
+| `CONFIDENCE_ENABLED` | `1` | after a run, score a grounded 0–100 **Delivery Confidence** ("did this actually deliver what was asked, correctly?") and, before a run, a **plan confidence ceiling**; `0` disables both |
+| `CONFIDENCE_<COEFFICIENT>` | (see `confidence.ConfidenceConfig`) | every scorer weight/knob is overridable, e.g. `CONFIDENCE_W_DEPTH`, `CONFIDENCE_DEPTH_FLOOR`, `CONFIDENCE_BAND_HIGH` |
+
+Delivery Confidence is **deterministic — no model call.** It is scored from ground truth the review
+loop already commits to state: evidence coverage (`plan.verification_coverage()`), scope delivered,
+verification depth (do the passing gates prove *behavior* — probe flow/http/isolation, e2e — or only
+units?), the pristine-checkout final replay, churn (rejections + replans), and integrity (high-risk
+accepts). The score is banded (Low / Moderate / High / Very High); the **High band is the `CONFIDENCE_BAND_HIGH`
+(default 75%) bar**. The current score is written to `.agentic/confidence.json` and every run appends a
+calibratable record to `.agentic/confidence.jsonl` (survives `--fresh`, like `forecasts.jsonl`). The
+pre-plan *ceiling* is the most a perfect execution of the plan could prove — a low ceiling flags an
+under-verified plan (unit-only where behavior gates are needed) before the budget is spent. See
+[usage](usage.md#delivery-confidence) and `orchestrator/confidence.py`.
+
 The dollars/minutes are computed by a **deterministic** estimator (`forecast.WeightedEstimator`)
 from the model's engineering-work estimate — the model never emits money or time. Every finished
 run appends a predicted-vs-actual record to `.agentic/forecasts.jsonl`, and the estimator folds
@@ -148,6 +185,8 @@ python3 -m orchestrator.probe docker-build --path . --tag check
 python3 -m orchestrator.probe env-file --path .env.production --requires DATABASE_URL,GCS_BUCKET
 python3 -m orchestrator.probe proc-up --start "npm run preview -- --port 4173" \
     --ready-port 4173 --then "python3 -m orchestrator.probe http --url http://localhost:4173 --expect-status 200"
+python3 -m orchestrator.probe flow --file flow.json --base-url http://localhost:8080
+python3 -m orchestrator.probe isolation --file isolation.json --base-url http://localhost:8080
 ```
 
 A long-running check can carry its own timeout: `timeout=900;npm run build`.
@@ -155,3 +194,18 @@ A long-running check can carry its own timeout: `timeout=900;npm run build`.
 `proc-up` waits for readiness (`--ready-log`/`--ready-port`, bounded by `--timeout`), then
 runs each `--then` check. Each `--then` gets its own budget — `--then-timeout <sec>` if set,
 otherwise `--timeout` — so a slow startup can never starve the checks that follow it.
+
+`flow` runs a scripted, multi-step HTTP flow from a JSON file and asserts **every** step — the
+end-to-end behavior a unit test misses (log in → capture a token → create → read it back). The
+flow file is `{"steps": [ ... ]}`; each step supports `method`, `path`, `headers`, `json`/`body`,
+`expect` (`status`, `body_contains`, `json` path→value), and `capture` (JSON path → variable).
+`${var}` interpolates a captured value or an environment variable; `--var K=V` seeds one. It's
+the workhorse for API-behavior gates, and a flow of health GETs against a deployed URL is how
+you smoke-test a deploy.
+
+`isolation` proves tenant/user boundaries — the multi-tenant safety gate. Given
+`{"identities": {name: {header, value}}, "resources": [{owner, url, leak_marker, ...}]}`, it
+verifies each resource's owner is allowed, every other identity (and, unless `--no-unauth-check`,
+an unauthenticated caller) is denied (`deny_status`, default `401/403/404`), and the owner's
+`leak_marker` never appears in anyone else's response (a hard failure). Seed tokens with
+`--var` or the environment.

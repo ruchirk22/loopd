@@ -46,6 +46,38 @@ class Handover:
     evidence_corpus: str = ""
 
 
+# Conservative signals in ADDED diff lines that a step changed real behavior / scoping.
+_ROUTE_HINT = re.compile(
+    r"@(?:app|router|blueprint|bp|api)\.(?:route|get|post|put|patch|delete)\b"
+    r"|\b(?:app|router|api)\.(?:get|post|put|patch|delete)\s*\("
+    r"|@(?:Get|Post|Put|Patch|Delete)Mapping"
+    r"|\bAPIRouter\(|\burlpatterns\b|\b(?:re_)?path\(", re.IGNORECASE)
+_TENANT_HINT = re.compile(
+    r"\b(?:tenant|org|organization|account|workspace|company)_id\b", re.IGNORECASE)
+_BEHAVIOR_GATES = ("probe flow", "probe http", "probe proc-up", "playwright", "cypress", "e2e")
+
+
+def _added_lines(diff_text: str) -> str:
+    return "\n".join(l[1:] for l in diff_text.splitlines()
+                     if l.startswith("+") and not l.startswith("+++"))
+
+
+def _weak_verification_flags(diff_text: str, verify_cmds: List[str]) -> List[str]:
+    added = _added_lines(diff_text)
+    verify = " ".join(verify_cmds).lower()
+    out: List[str] = []
+    if _ROUTE_HINT.search(added) and not any(g in verify for g in _BEHAVIOR_GATES):
+        out.append("WEAK_VERIFICATION (advisory): the diff adds/changes an HTTP route but the "
+                   "verify commands include no behavior gate (probe flow / http / e2e). A unit "
+                   "test may not prove the endpoint actually serves — consider rejecting for a "
+                   "`flow` gate, or note why it's already covered.")
+    if _TENANT_HINT.search(added) and "probe isolation" not in verify:
+        out.append("WEAK_ISOLATION (advisory): the diff touches tenant/user-scoped data "
+                   "(tenant_id/org_id/…) but has no `probe isolation` gate. Cross-tenant leaks "
+                   "are invisible to unit tests — consider requiring an isolation gate.")
+    return out
+
+
 def _integrity_flags(diff: dict, verify_cmds: List[str], tests_expected: bool):
     """Returns (flags, high_risk). high_risk flags force the PM to justify acceptance."""
     flags, high_risk = [], False
@@ -78,6 +110,10 @@ def _integrity_flags(diff: dict, verify_cmds: List[str], tests_expected: bool):
         flags.append(f"GATE_CONFIG_TOUCHED: files that DEFINE what the gate commands run were modified "
                      f"({', '.join(gate_config[:8])}) — e.g. a weakened `npm test`/pytest config makes "
                      "green gates meaningless. Inspect the actual check definition.")
+    # Advisory (NOT high_risk): nudge toward behavior/isolation gates when the diff clearly
+    # changes request-handling or tenant-scoped data but the gates are unit-only. Conservative
+    # patterns only, so these inform your review rather than block a valid accept.
+    flags += _weak_verification_flags(diff.get("diff") or "", verify_cmds)
     return flags, high_risk
 
 

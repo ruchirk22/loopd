@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from typing import List, Optional
 
-from . import analysis, memory
+from . import analysis, architecture, memory
 from .claude_cli import run_claude
 from .config import Config
 from .ledger import Ledger
@@ -295,6 +295,12 @@ class PMSession:
             parts.append("\n## Project memory (loopd) — honor these decisions, avoid the past "
                          "failures, consider the TODOs\n" + mem)
         parts.append("\n## Task brief\n" + self.brief)
+        if getattr(self.cfg, "architecture_enabled", True):
+            spine = architecture.as_prompt(self.cfg.repo)
+            if spine:
+                parts.append("\n## Architecture (BINDING — honor these decisions exactly; do not "
+                             "re-litigate them, and gate the tenancy/isolation strategy stated here)\n"
+                             + spine)
         if getattr(self.cfg, "constrained", False):
             parts.append(
                 "\n## BUDGET-CONSTRAINED EXECUTION (the owner chose to proceed under a tight budget)\n"

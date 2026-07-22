@@ -18,6 +18,10 @@ rules neither agent can override.
 | `orchestrator/ledger.py` | Durable state, per-step git commits, run branch, budget enforcement, resume. |
 | `orchestrator/seed.py` | Turns `/handoff`, `--brief`, `--seed-session`, or a task string into `.agentic/brief.md`. |
 | `orchestrator/forecast.py` | Execution Forecast: one cheap model call sizes the work; a deterministic, calibrated estimator turns it into predicted cost/runtime/steps and a recommended budget. Learns from `.agentic/forecasts.jsonl`. |
+| `orchestrator/architecture.py` | Architecture spine: binding per-project decisions (data model, contracts, tenancy/isolation strategy, invariants) the Architect proposes and every planner turn honors. Stored in `.agentic/architecture.md`. |
+| `orchestrator/program.py` | Program orchestration (`loopd build`): decomposes a PRD into ordered epics and runs each as a full, governed loop, sharing the spine + memory. Resumable via `.agentic/program.json`. |
+| `orchestrator/confidence.py` | Delivery Confidence: a deterministic (no model call) 0–100 score for "did this run actually deliver what was asked, correctly?", from evidence coverage, completion, verification depth, the final replay, churn, and integrity. Also a pre-plan confidence *ceiling*. Learns from `.agentic/confidence.jsonl`. |
+| `orchestrator/reporter.py` | The run's terminal surface: a live status line on a TTY, plain milestone lines off one, and the end-of-run handover. |
 | `orchestrator/analysis.py` | Failure Analysis: turns a stop into a grounded explanation (summary, root cause, ranked options, recommendation) from the PM's abort directive, or a deterministic fallback. Persisted to `.agentic/analysis.json`; rendered identically by CLI and dashboard. |
 | `orchestrator/github.py` | Optional GitHub enhancement via the `gh` CLI (never handles tokens): issues in (`gh issue view` → brief), PRs out (`gh pr create` with a handover body). Called only from the CLI/dashboard surface — the engine stays GitHub-agnostic. |
 | `orchestrator/loop.py` | The control plane that ties it together and enforces every rule. |
@@ -27,17 +31,28 @@ rules neither agent can override.
 ## The run lifecycle
 
 ```
-brief ─▶ forecast ─▶ user decision ─▶ plan ─▶ [ dispatch ─▶ developer ⇄ gates (inner retries)
-                (raise / constrain            ─▶ handover ─▶ planner review ] ─▶ finalize ─▶ grade
-                 / edit / abort)                                     │              (predicted
-                                            accept · reject · replan · descope       vs actual)
-                                                    · abort ◀────────┘
+brief ─▶ architecture spine ─▶ forecast ─▶ user decision ─▶ plan ─▶ [ dispatch ─▶ developer ⇄
+         (binding decisions,      (raise / constrain / abort)          gates (inner retries) ─▶
+          owner-approved)                                              handover ─▶ review ] ─▶
+                                            accept · reject · replan · descope   finalize ─▶ grade
+                                                    · abort ◀──────────────────┘
 ```
 
-The forecast runs exactly once, after the brief exists and before planning. On `--resume-run`
-it is skipped (the stored forecast — and any constrained-mode choice — is honored instead).
+The architecture spine and forecast run once, after the brief exists and before planning. On
+`--resume-run` they're skipped — the saved spine (`.agentic/architecture.md`) and forecast (and
+any constrained-mode choice) are honored instead.
+
+**At program scale**, `loopd build <prd>` sits one level up: it decomposes the PRD into ordered
+epics and runs the loop above *per epic*, with a governed owner checkpoint at each epic boundary,
+sharing the spine and memory so the epics cohere. Progress is tracked in `.agentic/program.json`
+(resumable with `loopd build --resume`).
 At every terminal outcome the run is *graded*: actuals are diffed against the forecast and the
-record is appended to `.agentic/forecasts.jsonl` to calibrate future estimates.
+record is appended to `.agentic/forecasts.jsonl` to calibrate future estimates, and a deterministic
+**Delivery Confidence** is scored from the run's ground truth (coverage, completion, verification
+depth, the final replay, churn, integrity) to `.agentic/confidence.json` and appended to
+`.agentic/confidence.jsonl`. Right after the plan is authored, a **plan confidence ceiling** is shown —
+the most a perfect execution of that plan could prove — so an under-verified plan surfaces before the
+budget is spent.
 
 1. **Plan.** The planner (read-only tools), seeded with the brief and the project's
    engineering memory (`.agentic/memory.md`), produces steps, each with `acceptance_criteria`
@@ -85,9 +100,11 @@ Review is grounded in ground truth the agents can't fabricate:
 - All state lives under `<repo>/.agentic/`: `state.json` (atomic writes), `log.jsonl`
   (event stream), `handovers/`, `escalation.json` (on failure), `report.md` (a
   human-readable end-of-run summary written on every outcome), `memory.md`
-  (engineering memory), `forecasts.jsonl` (predicted-vs-actual history), and `analysis.json`
-  (the current Failure Analysis, cleared when the blocker is resolved). `memory.md` and
-  `forecasts.jsonl` persist across `--fresh`. It is excluded from the target repo's history.
+  (engineering memory), `architecture.md` (the binding architecture spine), `forecasts.jsonl`
+  (predicted-vs-actual history), `confidence.json` (the run's Delivery Confidence) + `confidence.jsonl`
+  (calibratable score history), and `analysis.json` (the current Failure Analysis, cleared when
+  the blocker is resolved). `memory.md`, `architecture.md`, `forecasts.jsonl`, and `confidence.jsonl`
+  persist across `--fresh`. It is excluded from the target repo's history.
 - Each run works on an isolated `agentic/run-<timestamp>` branch, with one commit per
   accepted step — your main branch is never touched.
 - `--resume-run` reloads `state.json` and continues at the first unfinished step. Budget

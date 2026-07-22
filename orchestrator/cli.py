@@ -19,16 +19,25 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-from . import analysis, github, loop, workspace
+from . import analysis, github, loop, program, workspace
 from . import forecast as _forecast
 from .config import Config
 from .env import load_dotenv
 
-__version__ = "0.1.0"
+# Single source of truth is pyproject; read the installed package metadata so `loopd version`
+# never drifts from the released version. Falls back for a source checkout that isn't installed.
+try:
+    from importlib.metadata import PackageNotFoundError, version as _pkg_version
+    try:
+        __version__ = _pkg_version("loopd")
+    except PackageNotFoundError:
+        __version__ = "0.2.0"
+except Exception:
+    __version__ = "0.2.0"
 
 SUBCOMMANDS = {
     "ui", "status", "plan", "logs", "report", "memory", "projects", "history",
-    "resume", "new", "clone", "pr", "config", "help", "version",
+    "resume", "new", "build", "clone", "pr", "config", "help", "version",
 }
 
 # --------------------------------------------------------------- voice
@@ -676,6 +685,37 @@ def cmd_new(argv: List[str]) -> int:
     return code
 
 
+def cmd_build(argv: List[str]) -> int:
+    p = argparse.ArgumentParser(prog="loopd build",
+                                description="Build a whole PRD as a sequence of governed epics.")
+    p.add_argument("words", nargs="*", help="the PRD/spec text, @path, or a spec file")
+    _add_run_flags(p)
+    args = p.parse_args(argv)
+    repo = Path(args.repo).expanduser().resolve() if args.repo else Path.cwd()
+    task = None
+    if args.words:
+        head = args.words[0]
+        if head.startswith("@"):
+            task = Path(head[1:]).expanduser().read_text()
+        elif len(args.words) == 1 and Path(head).expanduser().is_file():
+            task = Path(head).expanduser().read_text()
+        else:
+            task = " ".join(args.words)
+    have_state = ((repo / ".agentic" / "program.json").is_file()
+                  or (repo / ".agentic" / "brief.md").is_file())
+    if not task and not args.resume and not have_state:
+        say('Describe the project or pass a spec, e.g. ' + _b('loopd build @prd.md'))
+        return 2
+    if not _require_claude():
+        return 2
+    cfg = _build_cfg(repo, args)
+    workspace.register(repo)
+    _open_line(repo)
+    code = program.run_program(task, cfg, resume=args.resume)
+    _close_line(repo, code)
+    return code
+
+
 def cmd_clone(argv: List[str]) -> int:
     p = argparse.ArgumentParser(prog="loopd clone")
     p.add_argument("url")
@@ -727,6 +767,7 @@ def cmd_help(argv: Optional[List[str]] = None) -> int:
     say(_b("  Build something"))
     say('  loopd "<what to build>"        ' + _dim("build it here (current directory is the project)"))
     say('  loopd path/to/spec.md          ' + _dim("build from a markdown spec"))
+    say('  loopd build @prd.md            ' + _dim("break a whole PRD into governed epics and build them"))
     say("  loopd new \"<idea>\"             " + _dim("start a brand-new project from scratch"))
     say("  loopd clone <url> [\"<task>\"]   " + _dim("clone a repo and (optionally) start building"))
     say('  loopd #142                     ' + _dim("build straight from a GitHub issue"))
@@ -768,8 +809,8 @@ def _repo_arg(argv: List[str]):
 DISPATCH = {
     "ui": cmd_ui, "status": cmd_status, "plan": cmd_plan, "logs": cmd_logs,
     "report": cmd_report, "memory": cmd_memory, "projects": cmd_projects,
-    "history": cmd_projects, "resume": cmd_resume, "new": cmd_new, "clone": cmd_clone,
-    "pr": cmd_pr, "config": cmd_config,
+    "history": cmd_projects, "resume": cmd_resume, "new": cmd_new, "build": cmd_build,
+    "clone": cmd_clone, "pr": cmd_pr, "config": cmd_config,
 }
 
 

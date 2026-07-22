@@ -17,7 +17,7 @@ import sys
 import time
 from typing import List, Optional, Tuple
 
-from . import analysis, developer, forecast, gates, memory
+from . import analysis, architecture, confidence, developer, forecast, gates, memory, reporter
 from .config import Config
 from .handover import Handover, build_handover
 from .ledger import BudgetExceeded, GitError, Ledger, NoChangesError
@@ -47,34 +47,37 @@ def run(task: Optional[str], cfg: Config, resume: bool = False, fresh: bool = Fa
               "Fix the repo state, then retry (--resume-run if a run was in progress).")
         return 1
     session_t0 = time.time()  # active time of THIS invocation (excludes idle between resumes)
+    rep = reporter.active()
+    rep.attach(session_t0, lambda: ledger.state.get("total_cost_usd", 0.0))
     code, detail = 1, ""
     try:
         code = _run(task, cfg, ledger, resume, on_start=on_start, resume_choice=resume_choice)
     except BudgetExceeded as exc:
         code, detail = 3, str(exc)
         ledger.write_escalation("budget_exceeded", ledger.load_plan(), detail=detail)
-        print(f"\n{exc}")
+        rep.block(f"\n{exc}")
     except PMTurnError as exc:
         # A PM failure before any plan exists is a setup/plan failure (exit 2), not a
         # resumable mid-run abort.
         plan = ledger.load_plan()
         code, detail = (2 if (plan is None or not plan.steps) else 1), str(exc)
         ledger.write_escalation("pm_turn_failed", plan, detail=detail)
-        print(f"\nStopping: {exc}")
+        rep.block(f"\nStopping: {exc}")
     except RunAborted as exc:
         code, detail = exc.code, str(exc)  # escalation + summary already emitted upstream
     except GitError as exc:
         # A mid-run git failure (index.lock, disk full, worktree add) is resumable.
         code, detail = 1, str(exc)
         ledger.write_escalation("git_error", ledger.load_plan(), detail=detail)
-        print(f"\nStopping on a git error: {exc}\n"
-              "State is saved — fix the repo and continue with --resume-run.")
+        rep.block(f"\nStopping on a git error: {exc}\n"
+                  "State is saved — fix the repo and continue with --resume-run.")
     except Exception as exc:  # never let an unexpected error escape as a bare traceback
         code, detail = 1, f"{type(exc).__name__}: {exc}"
         ledger.write_escalation("unexpected_error", ledger.load_plan(), detail=detail)
-        print(f"\nStopping on an unexpected error ({type(exc).__name__}): {exc}\n"
-              "State is saved — continue with --resume-run.")
+        rep.block(f"\nStopping on an unexpected error ({type(exc).__name__}): {exc}\n"
+                  "State is saved — continue with --resume-run.")
     finally:
+        rep.finish()  # drop the live status line before any end-of-run output
         # Accumulate this session's active runtime so a resumed run's actuals exclude the
         # idle wall-clock between sessions (state['started'] alone would include it).
         try:
@@ -97,6 +100,14 @@ def run(task: Optional[str], cfg: Config, resume: bool = False, fresh: bool = Fa
                 predicted, actual = graded
                 print(forecast.render_comparison(predicted, actual))
         except Exception:  # grading must never mask the real exit code
+            pass
+        # Delivery Confidence: a grounded 0–100 score for "did this actually deliver, correctly?"
+        # Deterministic (no model call), so it is safe to run on every terminal outcome.
+        try:
+            rep = ledger.record_confidence(ledger.load_plan(), code)
+            if rep is not None:
+                print(confidence.render_card(rep))
+        except Exception:  # the score must never mask the real exit code
             pass
         # If the run stopped unfinished and the PM didn't already diagnose it (budget/time
         # stop, crash, replan-cap), leave a basic deterministic explanation so the CLI and
@@ -146,6 +157,7 @@ def _run(task: Optional[str], cfg: Config, ledger: Ledger, resume: bool,
     brief = seed.ensure_brief(cfg, ledger, task, resume=resume)
 
     if not resume and ledger.load_plan() is None:
+        _architecture_phase(cfg, ledger, brief)  # establish the binding spine before forecasting
         _forecast_phase(cfg, ledger, brief)   # may raise RunAborted if the user declines
     elif resume:
         _restore_constrained(cfg, ledger)     # re-forecasting is skipped; honor the prior choice
@@ -166,22 +178,31 @@ def _run(task: Optional[str], cfg: Config, ledger: Ledger, resume: bool,
         pm.session_id = None                      # reseed so the decision reaches it
         ledger.set_pm_session(None)
 
+    rep = reporter.active()
     plan = ledger.load_plan()
     if plan is None or not plan.steps:
-        print("Planning…")
+        rep.planning()
         plan = _plan_phase(pm, ledger, cfg)
-        print(f"Plan: {plan.summary or '(no summary)'} — {len(plan.steps)} step(s), "
-              f"cost so far ${ledger.state['total_cost_usd']:.4f}\n")
+        rep.planned(plan, ledger.state["total_cost_usd"])
+        # Show the plan's confidence CEILING — the most a perfect execution of this plan could
+        # prove. A low ceiling here means the plan is under-verified (unit-only where behavior
+        # gates are needed); better to see it now than after spending the budget.
+        if cfg.confidence_enabled:
+            try:
+                rep.block(confidence.render_card(confidence.assess_plan(cfg, plan)))
+            except Exception:
+                pass
     else:
-        print(f"Resuming: {plan.digest()}\n")
+        rep.resuming(plan.digest())
 
     while True:
         if cfg.max_wall_clock_min and (time.time() - t0) > cfg.max_wall_clock_min * 60:
             ledger.state["_operational_stop"] = True  # resumable/operational — keep out of memory
             path = ledger.write_escalation("wall_clock_exceeded", plan)
-            print("\n" + ledger.report(plan))
-            print(f"\nWall-clock cap ({cfg.max_wall_clock_min} min) reached. "
-                  f"Re-run with --resume-run to continue. Escalation report: {path}")
+            rep.finish()
+            rep.block("\n" + ledger.report(plan))
+            rep.block(f"\nWall-clock cap ({cfg.max_wall_clock_min} min) reached. "
+                      f"Re-run with --resume-run to continue. Escalation report: {path}")
             return 1
 
         step = plan.next_pending()
@@ -195,6 +216,56 @@ def _run(task: Optional[str], cfg: Config, ledger: Ledger, resume: bool,
 
         if ledger.needs_checkpoint():
             _checkpoint(pm, plan, ledger)
+
+
+# --------------------------------------------------------- architecture spine
+
+def _architecture_phase(cfg: Config, ledger: Ledger, brief: str) -> None:
+    """Establish the binding architecture spine before planning: the Architect proposes it, the
+    owner approves it (governed). Skipped if disabled or a spine already exists (hand-written or
+    from a prior run) — that spine is honored via the planner seed either way. Degrades quietly
+    if the proposal call fails (a spine can be written by hand)."""
+    if not cfg.architecture_enabled or architecture.exists(cfg.repo):
+        return
+    spine = architecture.propose(cfg, brief, ledger=ledger)
+    if not spine:
+        return
+    architecture.save(cfg.repo, spine)
+    rep = reporter.active()
+    rep.block("\nProposed architecture (binding for this build):\n\n" + architecture.render(spine))
+    choice = _architecture_choice(cfg)
+    if choice == "discard":
+        architecture.discard(cfg.repo)
+        rep.block("  Architecture spine discarded — proceeding without it.")
+        return
+    if choice == "edit":
+        rep.block(f"  Saved to {cfg.repo}/.agentic/architecture.md — edit it, then `loopd resume`.")
+        raise RunAborted(1, "paused for architecture review")
+    ledger.log({"event": "architecture_established",
+                "tenancy": architecture.tenancy_strategy(cfg.repo)})
+
+
+def _architecture_choice(cfg: Config):
+    if cfg.assume_yes or cfg.force:
+        return "accept"
+    if not sys.stdin.isatty():
+        reporter.active().block("  (non-interactive: architecture accepted — "
+                                "review .agentic/architecture.md)")
+        return "accept"
+    while True:
+        print("\n  Use this architecture?   [A] accept  ·  "
+              "[E] edit the file, then `loopd resume`  ·  [D] discard")
+        try:
+            ans = input("  > ").strip().lower()
+        except EOFError:
+            return "accept"
+        if ans in ("", "a", "accept", "y", "yes"):
+            return "accept"
+        if ans in ("e", "edit"):
+            return "edit"
+        if ans in ("d", "discard", "n", "no"):
+            return "discard"
+        print("  (choose A, E, or D)")
 
 
 # --------------------------------------------------------- execution forecast
@@ -336,12 +407,17 @@ def _plan_phase(pm: PMSession, ledger: Ledger, cfg: Config) -> Plan:
             d = pm.corrective_turn(problems, allowed, empty)
         else:
             ledger.write_escalation("invalid_plan", None, detail="; ".join(problems))
-            print("PM could not produce a valid plan:\n  - " + "\n  - ".join(problems))
+            reporter.active().block("Planner could not produce a valid plan:\n  - "
+                                    + "\n  - ".join(problems))
             raise RunAborted(2, "invalid plan")
 
 
 def _step_phase(pm: PMSession, step: Step, plan: Plan, ledger: Ledger, cfg: Config) -> Plan:
-    print(f"→ Step {step.id}: {step.goal}")
+    try:
+        idx = plan.steps.index(step) + 1
+    except ValueError:
+        idx = len([s for s in plan.steps if s.status == DONE]) + 1
+    reporter.active().step_start(step, idx, len(plan.steps))
     step.status = IN_PROGRESS
     # Baseline for detecting out-of-band commits. On a resume mid-crash-window, keep the
     # marker's ORIGINAL base (the current HEAD already includes the crash commit, which would
@@ -406,7 +482,7 @@ def _step_phase(pm: PMSession, step: Step, plan: Plan, ledger: Ledger, cfg: Conf
                         step.status = DONE
                         ledger.save_plan(plan)          # durably records the adoption...
                         ledger.clear_pending_commit()   # ...then the marker is safe to drop
-                        print(f"   ✓ accepted (work already committed as {adopted[:9]})\n")
+                        reporter.active().accepted(adopted, adopted=True)
                         return plan
                     allowed = [a for a in allowed if a != "accept"]
                     ledger.log({"event": "accept_refused_no_changes", "step": step.id})
@@ -417,17 +493,20 @@ def _step_phase(pm: PMSession, step: Step, plan: Plan, ledger: Ledger, cfg: Conf
                                          ho.evidence_corpus, require_integrity_ack=ho.high_risk)
                     continue
                 step.status = DONE
+                step.criteria_evidence = [e for e in (d.get("criteria_evidence") or [])
+                                          if isinstance(e, dict)]  # for the coverage report
+                if ho.high_risk:  # an accept that had to clear integrity flags — feeds confidence
+                    ledger.state["high_risk_accepts"] = ledger.state.get("high_risk_accepts", 0) + 1
                 ledger.save_plan(plan)      # durably records the commit...
                 ledger.clear_pending_commit()  # ...only now is the crash-window marker safe to drop
-                print(f"   ✓ accepted, committed {sha[:9]}\n")
+                reporter.active().accepted(sha)
                 return plan
             if v == "reject":
                 step.rejections += 1
                 ledger.save_plan(plan)
                 ledger.log({"event": "step_rejected", "step": step.id,
                             "rejections": step.rejections})
-                print(f"   ✗ PM rejected (feedback sent to developer, "
-                      f"rejection {step.rejections}/{cfg.max_rejections_per_step})")
+                reporter.active().rejected(step.rejections, cfg.max_rejections_per_step)
                 prompt = d["next_prompt"]
                 # Honor the PM's choice of a fresh developer session (e.g. the current one
                 # is contaminated); clear the stored session so later cycles can't fall back
@@ -449,7 +528,7 @@ def _step_phase(pm: PMSession, step: Step, plan: Plan, ledger: Ledger, cfg: Conf
                 ledger.save_plan(plan)
                 ledger.log({"event": "step_descoped", "step": step.id,
                             "reason": step.skip_reason[:300]})
-                print(f"   ⤳ descoped: {step.skip_reason[:120]}\n")
+                reporter.active().descoped(step.skip_reason)
                 return plan
             if v == "abort":
                 _abort(ledger, plan, d, step.id)
@@ -463,10 +542,11 @@ def _inner_dev_loop(prompt: str, resume_sid: Optional[str], original_prompt: str
     gate_log, dev_err = "", ""
     dev_res = None
     sid = resume_sid
+    rep = reporter.active()
     for _ in range(cfg.max_attempts_per_step):
         step.attempts += 1
         ledger.save_plan(plan)
-        print(f"   dev attempt {step.attempts}…")
+        rep.attempt(step.attempts)
         res = developer.run_prompt(prompt, cfg, resume_session=sid,
                                    timeout_cost_usd=ledger.timeout_cost())
         # Persist the session id BEFORE charging (for both ok and error), so a budget stop
@@ -481,7 +561,7 @@ def _inner_dev_loop(prompt: str, resume_sid: Optional[str], original_prompt: str
         if not res.ok:
             dev_err = res.text[:2000]
             ledger.log({"event": "dev_error", "step": step.id, "error": dev_err[:500]})
-            print("   developer call errored")
+            rep.dev_errored()
             context = (f"[previous attempt ended abnormally]\n{dev_err}\n\n"
                        f"[last verification transcript]\n{gate_log[-2000:]}")
             if sid:
@@ -495,7 +575,7 @@ def _inner_dev_loop(prompt: str, resume_sid: Optional[str], original_prompt: str
         passed, gate_log = gates.run_gates(step.verify, cfg.repo, timeout_s=cfg.gate_timeout_s,
                                            setup=step.setup, teardown=step.teardown)
         ledger.log({"event": "gates", "step": step.id, "passed": passed})
-        print(f"   gates: {'PASS' if passed else 'fail'}")
+        rep.gate(passed)
         if passed:
             return True, gate_log, dev_res, ""
         prompt = developer.gate_feedback_prompt(gate_log[-cfg.gate_log_tail:])
@@ -514,18 +594,18 @@ def _finalize_phase(pm: PMSession, plan: Plan, ledger: Ledger,
         return None, _apply_replan(pm, d, plan, ledger, cfg, require_pending=True)
 
     final_cmds = [str(c) for c in d["final_verify"] if str(c).strip()] + list(cfg.final_verify_extra)
-    print("Final verification in a pristine worktree…")
+    rep = reporter.active()
+    rep.finalizing()
     ok, transcript = _final_verification(final_cmds, plan, ledger, cfg)
     if ok:
         if cfg.update_memory and d.get("memory"):
             memory.merge(cfg.repo, memory.from_directive_memory(d["memory"]))
             ledger.log({"event": "memory_updated"})
         ledger.finish()
-        print("\n" + ledger.report(plan))
-        print("\nTask complete — final verification and regression sweep passed. ✅")
+        rep.completed(reporter.render_completion(plan, ledger, cfg))
         return 0, plan
 
-    print("   final verification FAILED")
+    rep.final_failed()
     ledger.log({"event": "final_verify_failed"})
     d = pm.finalize_turn(plan, ["replan", "abort"], failure_transcript=transcript)
     d = _valid_directive(pm, d, ["replan", "abort"], plan, ledger, cfg)
@@ -566,7 +646,7 @@ def _valid_directive(pm: PMSession, d: dict, allowed: List[str], plan: Plan,
         ledger.write_escalation("invalid_directive", plan, detail=detail,
                                 pm_reasoning=str(d.get("reasoning", "")),
                                 step_id=step.id if step else "")
-        print(f"\nStopping: PM repeatedly issued invalid directives: {detail}")
+        reporter.active().block(f"\nStopping: the planner repeatedly issued invalid directives: {detail}")
         raise RunAborted(1, "invalid directive")
     return d
 
@@ -578,8 +658,10 @@ def _apply_replan(pm: PMSession, d: dict, plan: Plan, ledger: Ledger, cfg: Confi
         path = ledger.write_escalation("replan_cap_exhausted", plan,
                                        pm_reasoning=str(d.get("reasoning", "")),
                                        step_id=step.id if step else "")
-        print("\n" + ledger.report(plan))
-        print(f"\nStopping: replan cap ({cfg.max_replans}) exhausted. Escalation report: {path}")
+        rep = reporter.active()
+        rep.finish()
+        rep.block("\n" + ledger.report(plan))
+        rep.block(f"\nStopping: replan cap ({cfg.max_replans}) exhausted. Escalation report: {path}")
         raise RunAborted(1, "replan cap exhausted")
     if step is not None:
         ledger.revert_unclaimed_commits(step, plan, "replan")
@@ -597,7 +679,7 @@ def _apply_replan(pm: PMSession, d: dict, plan: Plan, ledger: Ledger, cfg: Confi
                 else:
                     ledger.save_plan(new_plan)
                     ledger.log({"event": "replanned", "replans_used": used})
-                    print(f"   ↻ plan updated by PM (replan {used}/{cfg.max_replans})\n")
+                    reporter.active().replanned(used, cfg.max_replans)
                     return new_plan
             except PlanValidationError as e:
                 problems = e.problems
@@ -607,19 +689,20 @@ def _apply_replan(pm: PMSession, d: dict, plan: Plan, ledger: Ledger, cfg: Confi
                 _abort(ledger, plan, d, step.id if step else "")
         else:
             ledger.write_escalation("invalid_replan", plan, detail="; ".join(problems))
-            print("PM could not produce valid plan mutations:\n  - " + "\n  - ".join(problems))
+            reporter.active().block("Planner could not produce valid plan mutations:\n  - "
+                                    + "\n  - ".join(problems))
             raise RunAborted(1, "invalid replan")
 
 
 def _checkpoint(pm: PMSession, plan: Plan, ledger: Ledger) -> None:
-    print("   … PM context checkpoint (fresh PM session next turn)")
+    reporter.active().checkpoint()
     try:
         ckpt = pm.checkpoint_turn(plan)
     except PMTurnError:
         # The live session is gone; a checkpoint from a blank session would fabricate.
         # Keep the existing checkpoint and current session rather than laundering memory.
         ledger.log({"event": "checkpoint_skipped_degraded"})
-        print("   (checkpoint skipped — session unavailable; keeping prior context)")
+        reporter.active().checkpoint(skipped=True)
         return
     ledger.save_checkpoint(ckpt)
     pm.reincarnate()
@@ -645,8 +728,10 @@ def _abort(ledger: Ledger, plan: Optional[Plan], d: dict, step_id: str = "") -> 
         source = "fallback"
     ledger.write_analysis(fa, source=source)
     ledger.state["_failure_note"] = f"{fa.summary} {fa.root_cause}"[:180]  # richer memory note
-    print("\n" + ledger.report(plan))
-    print(analysis.render(fa))
+    rep = reporter.active()
+    rep.finish()
+    rep.block("\n" + ledger.report(plan))
+    rep.block(analysis.render(fa))
     raise RunAborted(1, "PM abort")
 
 

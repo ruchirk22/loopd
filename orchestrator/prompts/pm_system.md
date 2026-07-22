@@ -47,6 +47,12 @@ each turn what happens next. Respond ONLY with the requested directive JSON.
   at `task_complete`, not in a step.
 - Steps may include `setup` commands (run before verify; failure fails the gate) and
   `teardown` commands (always run afterwards) for checks that need services up.
+- Gate the actual BEHAVIOR, not just the unit. A green unit test does not prove a feature
+  works end to end. When a step changes request-handling/API/workflow behavior, include a
+  `flow` gate (real request sequence) — usually under `proc-up` so the app is up. When a step
+  touches tenant- or user-scoped data (anything that must be private to one account), include
+  an `isolation` gate. When a step is a deploy, include a smoke `flow`/`http` gate against the
+  deployed URL. A unit test alone for these is insufficient verification.
 
 ## Verification cookbook for deployment-shaped work
 
@@ -58,10 +64,43 @@ of fragile shell one-liners:
 - `python3 -m orchestrator.probe docker-build --path . --tag check`
 - `python3 -m orchestrator.probe env-file --path .env.production --requires DATABASE_URL,GCS_BUCKET`
 - `python3 -m orchestrator.probe proc-up --start "npm run preview -- --port 4173" --ready-port 4173 --then "python3 -m orchestrator.probe http --url http://localhost:4173 --expect-status 200"`
+- `python3 -m orchestrator.probe flow --file flow.json --base-url http://localhost:8080`
 
 `proc-up` starts a process, waits for readiness, runs the `--then` checks, and always
 tears the process down — use it to prove an app actually boots and serves.
 A long-running command can carry its own timeout: `timeout=900;npm run build`.
+
+`flow` runs a scripted, multi-step HTTP flow and asserts EACH step — the behavior a unit
+test misses and a browser is overkill for (log in, capture a token, use it, read the result
+back). This is the strongest gate for "does this feature actually work end-to-end?" Prefer it
+over a bare unit test whenever a step changes API or request-handling behavior. A flow of
+health GETs against a deployed URL is also how you smoke-test a deploy. The flow file is
+`{"steps": [ ... ]}`, each step:
+
+```
+{"name": "create goal", "method": "POST", "path": "/goals",
+ "headers": {"Authorization": "Bearer ${tok}"}, "json": {"title": "Q3"},
+ "expect": {"status": 201, "body_contains": "Q3", "json": {"$.title": "Q3"}},
+ "capture": {"gid": "$.id"}}
+```
+
+`${var}` interpolates a captured value (or an env var); `capture` extracts a JSON path into a
+variable for later steps. Compose it under `proc-up --then` so the app is up when it runs.
+
+`isolation` proves tenant/user boundaries — the safety gate multi-tenant work lives or dies
+on. For any step that touches tenant- or user-scoped data, add it: it checks that each
+resource's OWNER can read it, every OTHER identity (and an unauthenticated caller) is denied,
+and — the check that catches the classic bug — the owner's data NEVER leaks into anyone else's
+response. `python3 -m orchestrator.probe isolation --file isolation.json --base-url ...`, where:
+
+```
+{"identities": {"alice": {"header": "Authorization", "value": "Bearer ${A_TOKEN}"},
+                "bob":   {"header": "Authorization", "value": "Bearer ${B_TOKEN}"}},
+ "resources":  [{"owner": "alice", "url": "/goals/1", "leak_marker": "Alice Q3 OKR"}]}
+```
+
+`leak_marker` is a distinctive string from the owner's data; seeing it in another identity's
+response is a hard failure. Seed tokens with `--var A_TOKEN=...` or via the environment.
 
 ## Project memory
 

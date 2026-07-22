@@ -4,6 +4,67 @@ All notable changes to loopd are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and loopd uses
 [semantic versioning](https://semver.org/).
 
+## [Unreleased]
+
+## [0.2.0] — 2026-07-23
+
+A feature release: loopd's "Proof Engine", the Program Layer (architecture spine + PRD→epics),
+the UX cockpit, Delivery Confidence, and automated PyPI publishing.
+
+### Added
+- Delivery Confidence: every run now ends with a grounded 0–100 score (banded Low/Moderate/
+  High/Very High) answering "did this run actually deliver what was asked, correctly?" — scored
+  **deterministically, with no model call**, from ground truth the review loop already commits:
+  evidence coverage, scope delivered, verification depth (do gates prove *behavior* — probe
+  flow/http/isolation, e2e — or only assert units?), the pristine-checkout replay, churn, and
+  integrity. The **High band (default 75%) is the bar.** Right after planning, loopd also shows
+  a plan confidence *ceiling* — the most a perfect execution of that plan could prove — so an
+  under-verified plan is caught before the budget is spent. Written to `.agentic/confidence.json`,
+  surfaced in the report / dashboard / PR body, and appended to `.agentic/confidence.jsonl`
+  (calibratable, survives `--fresh`). Knobs: `CONFIDENCE_ENABLED`, `CONFIDENCE_*` (see
+  `confidence.ConfidenceConfig`). See `orchestrator/confidence.py`.
+- `probe flow` — a scripted, multi-step HTTP verification probe (with variable capture and
+  `${var}` interpolation) that asserts an end-to-end behavior a unit test misses: log in →
+  capture a token → create → read it back. The first piece of the "Proof Engine" — deeper,
+  behavior-level gates. Stdlib-only; composes under `proc-up`.
+- `probe isolation` — a tenant/user-boundary probe: proves each resource's owner is allowed,
+  every other identity (and, by default, an unauthenticated caller) is denied, and the owner's
+  data never leaks into anyone else's response. The multi-tenant safety gate.
+- Verification coverage: the run report and dashboard now show how many acceptance criteria are
+  backed by cited evidence (e.g. "7/8 criteria backed by cited evidence") — a measurable read on
+  how thoroughly a run was proven.
+- Program orchestration (`loopd build <prd>`): a Program Planner decomposes a whole PRD into
+  ordered epics; each epic runs as a full, independently-verified loop (its own plan, gates, and
+  commits) while sharing the architecture spine and engineering memory, with a governed
+  checkpoint between epics. Resumable epic-by-epic via `.agentic/program.json`
+  (`loopd build --resume`). This is what turns a PRD into a coherent multi-tool app.
+- Architecture spine: before planning, an Architect proposes the binding per-project decisions
+  (stack, data model, module boundaries, API conventions, the tenancy/isolation strategy chosen
+  for this project, deploy/services, invariants) to `.agentic/architecture.md`; the owner
+  approves it (governed), and every planner turn honors it as hard context. Keeps app-scale,
+  multi-tenant builds coherent. Knobs: `ARCHITECTURE_ENABLED`, `ARCHITECT_MODEL`.
+- Automated PyPI publishing: pushing a `vX.Y.Z` tag runs the tests, builds, and publishes via
+  GitHub Actions using **PyPI Trusted Publishing (OIDC)** — no tokens or secrets. The workflow
+  guards that the tag matches the `pyproject` version. See `RELEASING.md`.
+
+### Changed
+- The planner is directed to gate real behavior, not just units: a `flow` gate for
+  request/API/workflow changes, an `isolation` gate for tenant/user-scoped data, and a smoke
+  gate for deploys.
+- Handover integrity flags now advise (without blocking) when a diff changes an HTTP route or
+  tenant-scoped data but the step's gates are unit-only — nudging toward a `flow`/`isolation` gate.
+
+These pieces together are loopd's "Proof Engine": behavior- and isolation-level verification so
+"done" means proven for multi-tenant, app-level work — not just "unit tests pass."
+
+- CLI cockpit: all run output now flows through one reporter — a calm live status line
+  (phase · step · elapsed · spend) on a terminal, plain milestone lines off one (so the
+  dashboard console and CI logs stay stable), and a rich end-of-run handover (what shipped,
+  verification coverage, cost, elapsed, commits, next command).
+- Dashboard live view: a spend-vs-budget meter (with the forecast estimate marked) that tracks
+  in place, and an inline "Latest" activity strip so a running project feels alive without
+  expanding the full timeline.
+
 ## [0.1.3] — 2026-07-20
 
 ### Changed
@@ -66,6 +127,8 @@ only ships changes it can prove.
   terminal outcome.
 - **pip packaging** — `pip install loopd`; stdlib-only, no dependencies.
 
+[0.2.0]: https://github.com/ruchirk22/loopd/releases/tag/v0.2.0
+[0.1.3]: https://github.com/ruchirk22/loopd/releases/tag/v0.1.3
 [0.1.2]: https://github.com/ruchirk22/loopd/releases/tag/v0.1.2
 [0.1.1]: https://github.com/ruchirk22/loopd/releases/tag/v0.1.1
 [0.1.0]: https://github.com/ruchirk22/loopd/releases/tag/v0.1.0
