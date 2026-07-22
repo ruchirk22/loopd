@@ -11,6 +11,9 @@ All notable changes to loopd are documented here. The format follows
   `${var}` interpolation) that asserts an end-to-end behavior a unit test misses: log in →
   capture a token → create → read it back. The first piece of the "Proof Engine" — deeper,
   behavior-level gates. Stdlib-only; composes under `proc-up`.
+- `probe isolation` — a tenant/user-boundary probe: proves each resource's owner is allowed,
+  every other identity (and, by default, an unauthenticated caller) is denied, and the owner's
+  data never leaks into anyone else's response. The multi-tenant safety gate.
 
 ## [0.1.3] — 2026-07-20
 

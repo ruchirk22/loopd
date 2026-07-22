@@ -81,6 +81,21 @@ health GETs against a deployed URL is also how you smoke-test a deploy. The flow
 `${var}` interpolates a captured value (or an env var); `capture` extracts a JSON path into a
 variable for later steps. Compose it under `proc-up --then` so the app is up when it runs.
 
+`isolation` proves tenant/user boundaries — the safety gate multi-tenant work lives or dies
+on. For any step that touches tenant- or user-scoped data, add it: it checks that each
+resource's OWNER can read it, every OTHER identity (and an unauthenticated caller) is denied,
+and — the check that catches the classic bug — the owner's data NEVER leaks into anyone else's
+response. `python3 -m orchestrator.probe isolation --file isolation.json --base-url ...`, where:
+
+```
+{"identities": {"alice": {"header": "Authorization", "value": "Bearer ${A_TOKEN}"},
+                "bob":   {"header": "Authorization", "value": "Bearer ${B_TOKEN}"}},
+ "resources":  [{"owner": "alice", "url": "/goals/1", "leak_marker": "Alice Q3 OKR"}]}
+```
+
+`leak_marker` is a distinctive string from the owner's data; seeing it in another identity's
+response is a hard failure. Seed tokens with `--var A_TOKEN=...` or via the environment.
+
 ## Project memory
 
 If a "Project memory (loopd)" section is present in your context, it is what loopd has

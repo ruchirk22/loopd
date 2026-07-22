@@ -149,6 +149,7 @@ python3 -m orchestrator.probe env-file --path .env.production --requires DATABAS
 python3 -m orchestrator.probe proc-up --start "npm run preview -- --port 4173" \
     --ready-port 4173 --then "python3 -m orchestrator.probe http --url http://localhost:4173 --expect-status 200"
 python3 -m orchestrator.probe flow --file flow.json --base-url http://localhost:8080
+python3 -m orchestrator.probe isolation --file isolation.json --base-url http://localhost:8080
 ```
 
 A long-running check can carry its own timeout: `timeout=900;npm run build`.
@@ -164,3 +165,10 @@ flow file is `{"steps": [ ... ]}`; each step supports `method`, `path`, `headers
 `${var}` interpolates a captured value or an environment variable; `--var K=V` seeds one. It's
 the workhorse for API-behavior gates, and a flow of health GETs against a deployed URL is how
 you smoke-test a deploy.
+
+`isolation` proves tenant/user boundaries — the multi-tenant safety gate. Given
+`{"identities": {name: {header, value}}, "resources": [{owner, url, leak_marker, ...}]}`, it
+verifies each resource's owner is allowed, every other identity (and, unless `--no-unauth-check`,
+an unauthenticated caller) is denied (`deny_status`, default `401/403/404`), and the owner's
+`leak_marker` never appears in anyone else's response (a hard failure). Seed tokens with
+`--var` or the environment.

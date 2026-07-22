@@ -260,5 +260,105 @@ class TestFlowProbe(unittest.TestCase):
         self.assertEqual(probe_main(["flow", "--file", "/nonexistent/flow.json"]), 2)
 
 
+class _TenantHandler(http.server.BaseHTTPRequestHandler):
+    """Two tenants (alice/bob) with owned resources, plus deliberately-flawed endpoints:
+    /leak leaks the owner's data to everyone; /soft returns 200 to non-owners (no marker);
+    /softunauth returns 200 only to an unauthenticated caller."""
+    def _who(self):
+        return {"Bearer tok-alice": "alice", "Bearer tok-bob": "bob"}.get(
+            self.headers.get("Authorization", ""))
+
+    def _json(self, code, obj):
+        body = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        who = self._who()
+        if self.path == "/goals/1":
+            return self._json(200, {"id": 1, "title": "Alice Q3 OKR"}) if who == "alice" \
+                else self._json(403, {"error": "forbidden"})
+        if self.path == "/reviews/2":
+            return self._json(200, {"id": 2, "title": "Bob self-review"}) if who == "bob" \
+                else self._json(403, {"error": "forbidden"})
+        if self.path == "/leak/1":                       # BROKEN: alice's data to anyone
+            return self._json(200, {"id": 1, "title": "Alice Q3 OKR"})
+        if self.path == "/soft/1":                       # non-owner gets 200 (no marker) — smell
+            return self._json(200, {"id": 1, "title": "Alice Q3 OKR"}) if who == "alice" \
+                else self._json(200, {"id": 1, "title": "(hidden)"})
+        if self.path == "/softunauth/1":                 # only unauth improperly gets 200
+            if who == "alice":
+                return self._json(200, {"id": 1, "title": "Alice Q3 OKR"})
+            if who == "bob":
+                return self._json(403, {"error": "forbidden"})
+            return self._json(200, {"id": 1, "title": "(hidden)"})
+        self._json(404, {"error": "nope"})
+
+    def log_message(self, *a):
+        pass
+
+
+class TestIsolationProbe(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _TenantHandler)
+        cls.port = cls.server.server_address[1]
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+        cls.base = f"http://127.0.0.1:{cls.port}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def _iso(self, resources):
+        spec = {"identities": {
+            "alice": {"header": "Authorization", "value": "Bearer ${A_TOKEN}"},
+            "bob": {"header": "Authorization", "value": "Bearer ${B_TOKEN}"}},
+            "resources": resources}
+        p = Path(tempfile.mkdtemp()) / "iso.json"
+        p.write_text(json.dumps(spec))
+        return str(p)
+
+    def _run(self, resources, *extra):
+        return probe_main(["isolation", "--file", self._iso(resources), "--base-url", self.base,
+                           "--var", "A_TOKEN=tok-alice", "--var", "B_TOKEN=tok-bob", *extra])
+
+    def test_boundaries_hold(self):
+        rc = self._run([
+            {"owner": "alice", "url": "/goals/1", "leak_marker": "Alice Q3 OKR"},
+            {"owner": "bob", "url": "/reviews/2", "leak_marker": "Bob self-review"},
+        ])
+        self.assertEqual(rc, 0)
+
+    def test_detects_cross_tenant_leak(self):
+        rc = self._run([{"owner": "alice", "url": "/leak/1", "leak_marker": "Alice Q3 OKR"}])
+        self.assertEqual(rc, 1)  # bob (and unauth) receive alice's marker → leak
+
+    def test_owner_denied_own_resource_fails(self):
+        # wrong owner token → alice is 403 on her own resource → fixture/auth error surfaced
+        rc = probe_main(["isolation", "--file",
+                         self._iso([{"owner": "alice", "url": "/goals/1", "leak_marker": "Alice Q3 OKR"}]),
+                         "--base-url", self.base, "--var", "A_TOKEN=wrong", "--var", "B_TOKEN=tok-bob"])
+        self.assertEqual(rc, 1)
+
+    def test_non_owner_not_denied_fails(self):
+        # /soft/1: bob gets 200 (no marker). No leak, but the boundary isn't enforced → fail.
+        rc = self._run([{"owner": "alice", "url": "/soft/1", "leak_marker": "Alice Q3 OKR"}])
+        self.assertEqual(rc, 1)
+
+    def test_unauth_check_and_flag(self):
+        # /softunauth/1: named identities are fine; only the unauthenticated caller gets 200.
+        res = [{"owner": "alice", "url": "/softunauth/1", "leak_marker": "Alice Q3 OKR"}]
+        self.assertEqual(self._run(res), 1)                          # unauth 200 → fail
+        self.assertEqual(self._run(res, "--no-unauth-check"), 0)     # flag skips the unauth check
+
+    def test_bad_file_is_usage_error(self):
+        self.assertEqual(probe_main(["isolation", "--file", "/nonexistent/iso.json"]), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
