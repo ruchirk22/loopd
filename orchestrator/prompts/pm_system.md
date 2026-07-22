@@ -47,6 +47,12 @@ each turn what happens next. Respond ONLY with the requested directive JSON.
   at `task_complete`, not in a step.
 - Steps may include `setup` commands (run before verify; failure fails the gate) and
   `teardown` commands (always run afterwards) for checks that need services up.
+- Gate the actual BEHAVIOR, not just the unit. A green unit test does not prove a feature
+  works end to end. When a step changes request-handling/API/workflow behavior, include a
+  `flow` gate (real request sequence) — usually under `proc-up` so the app is up. When a step
+  touches tenant- or user-scoped data (anything that must be private to one account), include
+  an `isolation` gate. When a step is a deploy, include a smoke `flow`/`http` gate against the
+  deployed URL. A unit test alone for these is insufficient verification.
 
 ## Verification cookbook for deployment-shaped work
 
