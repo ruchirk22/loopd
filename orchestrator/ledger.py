@@ -564,6 +564,14 @@ class Ledger:
             if tot:
                 lines.append(f"- **Verification coverage:** {ev}/{tot} acceptance criteria "
                              f"backed by cited evidence ({round(100 * ev / tot)}%)")
+            if self.cfg.confidence_enabled:
+                try:
+                    from . import confidence as _confidence
+                    rep = _confidence.assess_delivery(self.cfg, plan, self, code)
+                    lines.append(f"- **Delivery confidence:** {rep.score}% ({rep.band})"
+                                 + ("  ✓ meets the >75% bar" if rep.meets_bar else ""))
+                except Exception:
+                    pass
             lines += ["", "## Steps", "",
                       "| step | status | attempts | rejections | cost | commit |",
                       "|---|---|---|---|---|---|"]
@@ -666,3 +674,34 @@ class Ledger:
         except OSError:
             pass
         return fc, actual
+
+    def record_confidence(self, plan: Optional[Plan], code: int):
+        """Score the run's Delivery Confidence, persist it to .agentic/confidence.json, and
+        append a calibratable record to .agentic/confidence.jsonl. Returns the ConfidenceReport
+        for rendering, or None if disabled. Never raises fatally to the caller."""
+        if not self.cfg.confidence_enabled:
+            return None
+        from . import confidence as _confidence  # local import avoids import-order coupling
+        rep = _confidence.assess_delivery(self.cfg, plan, self, code)
+        d = rep.to_dict()
+        try:
+            (self.cfg.state_dir / "confidence.json").write_text(json.dumps(d, indent=2) + "\n")
+        except OSError:
+            pass
+        task_lines = (self.state.get("task") or "").strip().splitlines()
+        record = {
+            "ts": time.time(),
+            "run_id": self.state.get("started"),
+            "task": task_lines[0][:200] if task_lines else "",
+            "code": code,
+            "run_success": code == 0,
+            "score": rep.score,
+            "band": rep.band,
+            "meets_bar": rep.meets_bar,
+            "report": d,
+        }
+        try:
+            _confidence.ConfidenceHistory(self.cfg.repo).append(record)
+        except OSError:
+            pass
+        return rep

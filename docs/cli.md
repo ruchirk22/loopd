@@ -4,8 +4,8 @@ The single source of truth for every `loopd` command. For a guided walkthrough s
 [usage.md](usage.md).
 
 loopd is an autonomous engineering runtime that only ships changes it can prove: it **plans,
-forecasts, builds, verifies, recovers, remembers, and delivers** engineering work. You mostly
-think about one thing — *what you want built* — and run one command.
+forecasts, builds, verifies, scores its own confidence, recovers, remembers, and delivers**
+engineering work. You mostly think about one thing — *what you want built* — and run one command.
 
 ## Install the `loopd` command
 

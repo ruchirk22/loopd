@@ -28,6 +28,16 @@ Yes — it's `gates.py` and `probe.py`, and it's the whole point: a step is "don
 `verify` commands exit 0, run by loopd outside the model. A step with no checks can't be
 accepted. Acceptance also requires evidence quoted from the real diff/transcript.
 
+### How do I know if I can trust a delivery?
+Every run ends with a **Delivery Confidence** score (0–100, banded) — a deterministic, no-model-call
+answer scored from ground truth: which acceptance criteria are backed by cited evidence, how much
+scope was delivered, whether the passing gates prove *behavior* (not just units), whether the
+pristine-checkout replay passed, churn, and integrity. The **High band (default 75%) is the bar**.
+It's in `report.md`, the dashboard, the PR body, and `.agentic/confidence.json`; disable with
+`CONFIDENCE_ENABLED=0`. Right after planning, loopd also shows the plan's confidence *ceiling* so an
+under-verified plan is caught before the budget is spent. See
+[usage](usage.md#delivery-confidence).
+
 ### Does it touch my main branch?
 No. Each run works on an isolated `agentic/run-<timestamp>` branch with one commit per accepted
 step. Uncommitted changes are left alone.

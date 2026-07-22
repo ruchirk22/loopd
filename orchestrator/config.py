@@ -77,6 +77,13 @@ class Config:
     forecast_max_turns: int = field(default_factory=lambda: int(_env("FORECAST_MAX_TURNS", "6")))
     # Estimator coefficients live in forecast.EstimatorConfig (env: FORECAST_*), not here.
 
+    # --- Delivery Confidence (deterministic post-run self-eval; see confidence.py) ---
+    # A grounded 0–100 score for "did this run actually deliver what was asked, correctly?"
+    # No model call — scored from evidence coverage, completion, verification depth, the final
+    # replay, churn, and integrity. Scorer coefficients live in confidence.ConfidenceConfig
+    # (env: CONFIDENCE_*), not here. `0` disables the score entirely.
+    confidence_enabled: bool = field(default_factory=lambda: _env("CONFIDENCE_ENABLED", "1") not in ("0", "false", ""))
+
     # --- Architecture spine (binding per-project decisions; see architecture.py) ---
     architecture_enabled: bool = field(default_factory=lambda: _env("ARCHITECTURE_ENABLED", "1") not in ("0", "false", ""))
     # The Architect authors load-bearing decisions, so it uses the capable planner model.

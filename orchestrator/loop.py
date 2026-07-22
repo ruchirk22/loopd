@@ -17,7 +17,7 @@ import sys
 import time
 from typing import List, Optional, Tuple
 
-from . import analysis, architecture, developer, forecast, gates, memory, reporter
+from . import analysis, architecture, confidence, developer, forecast, gates, memory, reporter
 from .config import Config
 from .handover import Handover, build_handover
 from .ledger import BudgetExceeded, GitError, Ledger, NoChangesError
@@ -101,6 +101,14 @@ def run(task: Optional[str], cfg: Config, resume: bool = False, fresh: bool = Fa
                 print(forecast.render_comparison(predicted, actual))
         except Exception:  # grading must never mask the real exit code
             pass
+        # Delivery Confidence: a grounded 0–100 score for "did this actually deliver, correctly?"
+        # Deterministic (no model call), so it is safe to run on every terminal outcome.
+        try:
+            rep = ledger.record_confidence(ledger.load_plan(), code)
+            if rep is not None:
+                print(confidence.render_card(rep))
+        except Exception:  # the score must never mask the real exit code
+            pass
         # If the run stopped unfinished and the PM didn't already diagnose it (budget/time
         # stop, crash, replan-cap), leave a basic deterministic explanation so the CLI and
         # dashboard 'needs you' state always have something grounded to show.
@@ -176,6 +184,14 @@ def _run(task: Optional[str], cfg: Config, ledger: Ledger, resume: bool,
         rep.planning()
         plan = _plan_phase(pm, ledger, cfg)
         rep.planned(plan, ledger.state["total_cost_usd"])
+        # Show the plan's confidence CEILING — the most a perfect execution of this plan could
+        # prove. A low ceiling here means the plan is under-verified (unit-only where behavior
+        # gates are needed); better to see it now than after spending the budget.
+        if cfg.confidence_enabled:
+            try:
+                rep.block(confidence.render_card(confidence.assess_plan(cfg, plan)))
+            except Exception:
+                pass
     else:
         rep.resuming(plan.digest())
 
@@ -479,6 +495,8 @@ def _step_phase(pm: PMSession, step: Step, plan: Plan, ledger: Ledger, cfg: Conf
                 step.status = DONE
                 step.criteria_evidence = [e for e in (d.get("criteria_evidence") or [])
                                           if isinstance(e, dict)]  # for the coverage report
+                if ho.high_risk:  # an accept that had to clear integrity flags — feeds confidence
+                    ledger.state["high_risk_accepts"] = ledger.state.get("high_risk_accepts", 0) + 1
                 ledger.save_plan(plan)      # durably records the commit...
                 ledger.clear_pending_commit()  # ...only now is the crash-window marker safe to drop
                 reporter.active().accepted(sha)

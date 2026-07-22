@@ -119,6 +119,23 @@ it survives `--fresh`. See `orchestrator/architecture.py`.
 independently-verified loop, with a governed checkpoint between epics; `loopd build --resume`
 continues. Progress lives in `.agentic/program.json`. See `orchestrator/program.py`.
 
+### Delivery Confidence
+| Variable | Default | Meaning |
+|---|---|---|
+| `CONFIDENCE_ENABLED` | `1` | after a run, score a grounded 0–100 **Delivery Confidence** ("did this actually deliver what was asked, correctly?") and, before a run, a **plan confidence ceiling**; `0` disables both |
+| `CONFIDENCE_<COEFFICIENT>` | (see `confidence.ConfidenceConfig`) | every scorer weight/knob is overridable, e.g. `CONFIDENCE_W_DEPTH`, `CONFIDENCE_DEPTH_FLOOR`, `CONFIDENCE_BAND_HIGH` |
+
+Delivery Confidence is **deterministic — no model call.** It is scored from ground truth the review
+loop already commits to state: evidence coverage (`plan.verification_coverage()`), scope delivered,
+verification depth (do the passing gates prove *behavior* — probe flow/http/isolation, e2e — or only
+units?), the pristine-checkout final replay, churn (rejections + replans), and integrity (high-risk
+accepts). The score is banded (Low / Moderate / High / Very High); the **High band is the `CONFIDENCE_BAND_HIGH`
+(default 75%) bar**. The current score is written to `.agentic/confidence.json` and every run appends a
+calibratable record to `.agentic/confidence.jsonl` (survives `--fresh`, like `forecasts.jsonl`). The
+pre-plan *ceiling* is the most a perfect execution of the plan could prove — a low ceiling flags an
+under-verified plan (unit-only where behavior gates are needed) before the budget is spent. See
+[usage](usage.md#delivery-confidence) and `orchestrator/confidence.py`.
+
 The dollars/minutes are computed by a **deterministic** estimator (`forecast.WeightedEstimator`)
 from the model's engineering-work estimate — the model never emits money or time. Every finished
 run appends a predicted-vs-actual record to `.agentic/forecasts.jsonl`, and the estimator folds

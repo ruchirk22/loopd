@@ -7,6 +7,17 @@ All notable changes to loopd are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Delivery Confidence: every run now ends with a grounded 0–100 score (banded Low/Moderate/
+  High/Very High) answering "did this run actually deliver what was asked, correctly?" — scored
+  **deterministically, with no model call**, from ground truth the review loop already commits:
+  evidence coverage, scope delivered, verification depth (do gates prove *behavior* — probe
+  flow/http/isolation, e2e — or only assert units?), the pristine-checkout replay, churn, and
+  integrity. The **High band (default 75%) is the bar.** Right after planning, loopd also shows
+  a plan confidence *ceiling* — the most a perfect execution of that plan could prove — so an
+  under-verified plan is caught before the budget is spent. Written to `.agentic/confidence.json`,
+  surfaced in the report / dashboard / PR body, and appended to `.agentic/confidence.jsonl`
+  (calibratable, survives `--fresh`). Knobs: `CONFIDENCE_ENABLED`, `CONFIDENCE_*` (see
+  `confidence.ConfidenceConfig`). See `orchestrator/confidence.py`.
 - `probe flow` — a scripted, multi-step HTTP verification probe (with variable capture and
   `${var}` interpolation) that asserts an end-to-end behavior a unit test misses: log in →
   capture a token → create → read it back. The first piece of the "Proof Engine" — deeper,

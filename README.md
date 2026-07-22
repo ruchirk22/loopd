@@ -73,6 +73,9 @@ Execution Forecast  →  cost/runtime/steps estimate  →  raise budget · run c
        Orchestrator (Python) holds the rules: gates run HERE · accept needs green gates
        + a real diff + evidence · task_complete ⇒ final verify + regression sweep in a
        PRISTINE checkout · budget / attempt / replan caps · resumable state
+        │
+        ▼
+Delivery Confidence  →  grounded 0–100 score (coverage · depth · replay · churn) → trust the result?
 ```
 
 </details>
@@ -97,6 +100,10 @@ Execution Forecast  →  cost/runtime/steps estimate  →  raise budget · run c
 - **Execution Forecast.** Before it builds, loopd predicts cost, runtime, steps, and risk,
   then asks the one decision that matters — the budget. It grades itself against actuals and
   gets truer over time. [Read more →](docs/usage.md#3-the-execution-forecast)
+- **Delivery Confidence.** Every run ends with a grounded 0–100 score — *did this actually
+  deliver what was asked, correctly?* — computed deterministically (no model call) from evidence
+  coverage, verification depth, the final replay, and more. The **>75% band is the bar**, and a
+  pre-run plan *ceiling* flags an under-verified plan before you spend. [Read more →](docs/usage.md#delivery-confidence)
 - **Failure Analysis.** When loopd genuinely can't finish, it explains the blocker like a
   senior engineer (what happened · why · what it'd do · other options) and resumes from your
   one-click choice.
@@ -177,6 +184,9 @@ Prefer a browser? `loopd ui` opens a local dashboard to launch and watch runs li
    gates are green.
 5. **Finalize.** When no steps remain, the task's final checks *and* every accepted step's
    checks are replayed in a **pristine checkout**. Only then is the run complete.
+6. **Score.** loopd rates its own **Delivery Confidence** (0–100) from the run's ground truth —
+   evidence coverage, verification depth, the pristine replay, and more — so you get a grounded
+   read on whether to trust the result, not just a green check.
 
 Every run writes a human-readable `.agentic/report.md` (outcome, per-step status, cost,
 time, commits) on completion *or* failure. That plus plan state, the event log, and the
