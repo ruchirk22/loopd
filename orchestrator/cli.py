@@ -24,7 +24,16 @@ from . import forecast as _forecast
 from .config import Config
 from .env import load_dotenv
 
-__version__ = "0.1.0"
+# Single source of truth is pyproject; read the installed package metadata so `loopd version`
+# never drifts from the released version. Falls back for a source checkout that isn't installed.
+try:
+    from importlib.metadata import PackageNotFoundError, version as _pkg_version
+    try:
+        __version__ = _pkg_version("loopd")
+    except PackageNotFoundError:
+        __version__ = "0.2.0"
+except Exception:
+    __version__ = "0.2.0"
 
 SUBCOMMANDS = {
     "ui", "status", "plan", "logs", "report", "memory", "projects", "history",

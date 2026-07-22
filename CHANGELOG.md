@@ -6,6 +6,11 @@ All notable changes to loopd are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-07-23
+
+A feature release: loopd's "Proof Engine", the Program Layer (architecture spine + PRD→epics),
+the UX cockpit, Delivery Confidence, and automated PyPI publishing.
+
 ### Added
 - Delivery Confidence: every run now ends with a grounded 0–100 score (banded Low/Moderate/
   High/Very High) answering "did this run actually deliver what was asked, correctly?" — scored
@@ -38,6 +43,9 @@ All notable changes to loopd are documented here. The format follows
   for this project, deploy/services, invariants) to `.agentic/architecture.md`; the owner
   approves it (governed), and every planner turn honors it as hard context. Keeps app-scale,
   multi-tenant builds coherent. Knobs: `ARCHITECTURE_ENABLED`, `ARCHITECT_MODEL`.
+- Automated PyPI publishing: pushing a `vX.Y.Z` tag runs the tests, builds, and publishes via
+  GitHub Actions using **PyPI Trusted Publishing (OIDC)** — no tokens or secrets. The workflow
+  guards that the tag matches the `pyproject` version. See `RELEASING.md`.
 
 ### Changed
 - The planner is directed to gate real behavior, not just units: a `flow` gate for
@@ -119,6 +127,8 @@ only ships changes it can prove.
   terminal outcome.
 - **pip packaging** — `pip install loopd`; stdlib-only, no dependencies.
 
+[0.2.0]: https://github.com/ruchirk22/loopd/releases/tag/v0.2.0
+[0.1.3]: https://github.com/ruchirk22/loopd/releases/tag/v0.1.3
 [0.1.2]: https://github.com/ruchirk22/loopd/releases/tag/v0.1.2
 [0.1.1]: https://github.com/ruchirk22/loopd/releases/tag/v0.1.1
 [0.1.0]: https://github.com/ruchirk22/loopd/releases/tag/v0.1.0
