@@ -944,6 +944,9 @@ function appSig(s,k){
 function patchLive(s){
   const e=document.getElementById("live-elapsed"); if(e)e.textContent=dur(s.elapsed_s);
   const c=document.getElementById("live-cost"); if(c)c.textContent=money(s.total_cost_usd);
+  const sp=document.getElementById("live-spend");
+  if(sp){ const f=s.forecast||{}; const b=(f.chosen_budget_usd||s.budget_usd||0);
+    sp.style.width=(b?Math.min(100,100*((s.total_cost_usd||0)/b)):0)+"%"; }
 }
 
 /* rail (shared) */
@@ -1029,12 +1032,21 @@ function viewActive(s){
       <div class="sub">${node?esc(node)+"…":""}</div>
       <div class="bar"><span style="width:${pct}%"></span></div>
       <div class="metaline"><span>elapsed <span id="live-elapsed">${dur(s.elapsed_s)}</span></span><span><span id="live-cost">${money(s.total_cost_usd)}</span> of ${money(budget)}</span></div>
+      ${budget?`<div class="bar thin" title="spend vs budget${fmark!=null?" (marker = forecast)":""}">
+        <span id="live-spend" style="width:${spentPct}%"></span>${fmark!=null?`<span class="fmark" style="left:${fmark}%"></span>`:""}</div>`:""}
       <div class="quote">&ldquo;I've got it from here. Close this any time — nothing is lost.&rdquo;</div>
     </div>
     ${planCard(s)}
-    <div class="toggle" onclick="toggleActivity()">&#9662; Activity — timeline &amp; console</div>
+    ${liveActivity(s)}
+    <div class="toggle" onclick="toggleActivity()">&#9662; Activity — full timeline &amp; console</div>
     <div id="activity"></div>
   </div><div>${rail(s)}</div></div>`;
+}
+function liveActivity(s){
+  const tl=(s.timeline||[]).slice(-4).reverse();
+  if(!tl.length) return "";
+  const rows=tl.map(e=>`<div class="ev"><span class="t">${tfmt(e.ts)}</span><span>${esc(e.text)}</span></div>`).join("");
+  return `<div class="card livefeed"><h3>Latest</h3><div class="tl">${rows}</div></div>`;
 }
 function planCard(s){
   const c=s.counts||{}; const steps=s.steps||[];

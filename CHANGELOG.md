@@ -37,6 +37,9 @@ These pieces together are loopd's "Proof Engine": behavior- and isolation-level 
   (phase · step · elapsed · spend) on a terminal, plain milestone lines off one (so the
   dashboard console and CI logs stay stable), and a rich end-of-run handover (what shipped,
   verification coverage, cost, elapsed, commits, next command).
+- Dashboard live view: a spend-vs-budget meter (with the forecast estimate marked) that tracks
+  in place, and an inline "Latest" activity strip so a running project feels alive without
+  expanding the full timeline.
 
 ## [0.1.3] — 2026-07-20
 
