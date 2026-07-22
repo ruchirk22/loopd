@@ -262,6 +262,9 @@ class Step:
     dev_session_id: str = ""
     dev_summary: str = ""
     skip_reason: str = ""
+    # Per-criterion accept evidence [{criterion, satisfied, evidence}] the PM cited on accept —
+    # the basis for the run's verification-coverage report.
+    criteria_evidence: List[dict] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, d: dict) -> "Step":
@@ -285,6 +288,7 @@ class Step:
             dev_session_id=str(d.get("dev_session_id", "") or ""),
             dev_summary=str(d.get("dev_summary", "") or ""),
             skip_reason=str(d.get("skip_reason", "") or ""),
+            criteria_evidence=[e for e in (d.get("criteria_evidence") or []) if isinstance(e, dict)],
         )
 
     def brief(self) -> str:
@@ -320,6 +324,18 @@ class Plan:
 
     def done_steps(self) -> List[Step]:
         return [s for s in self.steps if s.status == DONE]
+
+    def verification_coverage(self) -> tuple:
+        """(criteria backed by cited satisfied evidence, total criteria) over DONE steps —
+        the run's measurable verification coverage."""
+        total = evidenced = 0
+        for s in self.steps:
+            if s.status != DONE:
+                continue
+            n = len(s.acceptance_criteria)
+            total += n
+            evidenced += min(n, sum(1 for e in s.criteria_evidence if e.get("satisfied")))
+        return evidenced, total
 
     def to_dict(self) -> dict:
         return {"summary": self.summary, "steps": [asdict(s) for s in self.steps],

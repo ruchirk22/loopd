@@ -417,6 +417,8 @@ def _step_phase(pm: PMSession, step: Step, plan: Plan, ledger: Ledger, cfg: Conf
                                          ho.evidence_corpus, require_integrity_ack=ho.high_risk)
                     continue
                 step.status = DONE
+                step.criteria_evidence = [e for e in (d.get("criteria_evidence") or [])
+                                          if isinstance(e, dict)]  # for the coverage report
                 ledger.save_plan(plan)      # durably records the commit...
                 ledger.clear_pending_commit()  # ...only now is the crash-window marker safe to drop
                 print(f"   ✓ accepted, committed {sha[:9]}\n")

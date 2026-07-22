@@ -138,6 +138,17 @@ def _gate_stats(events):
     return passed, len(g)
 
 
+def _coverage(steps):
+    """Verification coverage over DONE steps: acceptance criteria backed by cited evidence."""
+    ev = tot = 0
+    for s in steps:
+        if s.get("status") == "done":
+            n = len(s.get("acceptance_criteria") or [])
+            tot += n
+            ev += min(n, sum(1 for e in (s.get("criteria_evidence") or []) if e.get("satisfied")))
+    return {"evidenced": ev, "total": tot}
+
+
 def snapshot(repo, running: bool = False) -> dict:
     repo = Path(repo).expanduser().resolve()
     ad = repo / ".agentic"
@@ -205,6 +216,7 @@ def snapshot(repo, running: bool = False) -> dict:
             "attempts": sum(s.get("attempts", 0) for s in steps),
             "gate_pass": gate_pass, "gate_total": gate_total,
         },
+        "verification_coverage": _coverage(steps),
         "timeline": _timeline(events),
         "has_report": (ad / "report.md").is_file(),
         "has_escalation": (ad / "escalation.json").is_file(),
@@ -1098,6 +1110,8 @@ function viewReport(s){
   const f=s.forecast||{}; const a=f.actual||{}; const c=s.counts||{};
   const task=(s.task||"").split("\n")[0];
   const acc=(f.estimated_cost_usd!=null&&a.cost_usd!=null)?accuracyPct(f,a):null;
+  const cov=s.verification_coverage||{};
+  const covLine=cov.total?` &nbsp;&nbsp; &#10003; ${cov.evidenced}/${cov.total} criteria backed by evidence`:"";
   const vt=`<div class="tiles">
     <div class="card"><h3>Forecast vs actual</h3>
       ${vaRow("cost",money(f.estimated_cost_usd),money(a.cost_usd))}
@@ -1121,7 +1135,7 @@ function viewReport(s){
       <div class="state"><span>&#10003; Delivered</span><span>${dur(s.elapsed_s)} &middot; ${money(s.total_cost_usd)}</span></div>
       <div class="headline">loopd finished the work.</div>
       <div class="sub">${task?esc(task):"See the summary below."}</div>
-      <div class="verified">&#10003; every step's checks &nbsp;&nbsp; &#10003; full replay in a clean checkout</div>
+      <div class="verified">&#10003; every step's checks &nbsp;&nbsp; &#10003; full replay in a clean checkout${covLine}</div>
     </div>
     ${vt}
     <div class="actions"><button class="primary" onclick="freshObjective()">Start another objective</button>

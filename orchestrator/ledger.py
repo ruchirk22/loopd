@@ -560,6 +560,10 @@ class Ledger:
             skipped = [s for s in plan.steps if s.status == SKIPPED]
             lines.append(f"- **Steps:** {len(done)} done, {len(skipped)} descoped "
                          f"of {len(plan.steps)}")
+            ev, tot = plan.verification_coverage()
+            if tot:
+                lines.append(f"- **Verification coverage:** {ev}/{tot} acceptance criteria "
+                             f"backed by cited evidence ({round(100 * ev / tot)}%)")
             lines += ["", "## Steps", "",
                       "| step | status | attempts | rejections | cost | commit |",
                       "|---|---|---|---|---|---|"]

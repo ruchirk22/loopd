@@ -14,6 +14,19 @@ All notable changes to loopd are documented here. The format follows
 - `probe isolation` — a tenant/user-boundary probe: proves each resource's owner is allowed,
   every other identity (and, by default, an unauthenticated caller) is denied, and the owner's
   data never leaks into anyone else's response. The multi-tenant safety gate.
+- Verification coverage: the run report and dashboard now show how many acceptance criteria are
+  backed by cited evidence (e.g. "7/8 criteria backed by cited evidence") — a measurable read on
+  how thoroughly a run was proven.
+
+### Changed
+- The planner is directed to gate real behavior, not just units: a `flow` gate for
+  request/API/workflow changes, an `isolation` gate for tenant/user-scoped data, and a smoke
+  gate for deploys.
+- Handover integrity flags now advise (without blocking) when a diff changes an HTTP route or
+  tenant-scoped data but the step's gates are unit-only — nudging toward a `flow`/`isolation` gate.
+
+These pieces together are loopd's "Proof Engine": behavior- and isolation-level verification so
+"done" means proven for multi-tenant, app-level work — not just "unit tests pass."
 
 ## [0.1.3] — 2026-07-20
 
