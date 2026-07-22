@@ -28,6 +28,11 @@ All notable changes to loopd are documented here. The format follows
 These pieces together are loopd's "Proof Engine": behavior- and isolation-level verification so
 "done" means proven for multi-tenant, app-level work — not just "unit tests pass."
 
+- CLI cockpit: all run output now flows through one reporter — a calm live status line
+  (phase · step · elapsed · spend) on a terminal, plain milestone lines off one (so the
+  dashboard console and CI logs stay stable), and a rich end-of-run handover (what shipped,
+  verification coverage, cost, elapsed, commits, next command).
+
 ## [0.1.3] — 2026-07-20
 
 ### Changed
