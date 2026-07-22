@@ -1,0 +1,102 @@
+name: Release
+
+# Publish loopd to PyPI when a version tag is pushed:
+#     git tag v0.1.4 && git push origin v0.1.4
+#
+# Auth is PyPI Trusted Publishing (OIDC) — there is NO token or secret. PyPI trusts this exact
+# repo + workflow + environment; the `publish` job mints a short-lived OIDC token at run time.
+# One-time PyPI setup and the release steps are in RELEASING.md.
+
+on:
+  push:
+    tags: ["v*"]
+
+# Least privilege by default; the publish job opts into id-token below.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false   # never cancel a publish mid-flight
+
+jobs:
+  # Never publish untested code — re-run the full suite on the exact tagged commit.
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.10", "3.11", "3.12", "3.13"]
+        include:
+          - os: macos-latest
+            python: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Configure git (ledger tests create repos)
+        run: |
+          git config --global user.email ci@example.com
+          git config --global user.name ci
+      - name: Unit + end-to-end tests (stdlib only, no network, no API)
+        run: python -m unittest discover -s tests -v
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Guard — the tag must match the pyproject version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(python -c 'import tomllib,pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          echo "tag=$TAG  pyproject=$PKG"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::tag v$TAG does not match pyproject version $PKG — bump the version before tagging"
+            exit 1
+          fi
+      - name: Build the wheel + sdist
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build
+      - name: Validate package metadata (twine check)
+        run: twine check dist/*
+      - name: Confirm prompts + assets are bundled
+        run: |
+          python - <<'PY'
+          import glob, zipfile
+          whl = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(whl).namelist()
+          assert any(n.endswith("orchestrator/prompts/pm_system.md") for n in names), "prompts missing from wheel"
+          assert any("orchestrator/assets/loopd.svg" in n for n in names), "assets missing from wheel"
+          print("wheel OK:", whl)
+          PY
+      - name: Upload the built distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: [test, build]
+    runs-on: ubuntu-latest
+    # The `pypi` environment lets you add a required-reviewer approval gate in
+    # Settings → Environments, and it MUST match the environment name registered on the
+    # PyPI trusted publisher.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/loopd/
+    permissions:
+      id-token: write   # required for OIDC Trusted Publishing (no password/secret)
+    steps:
+      - name: Download the built distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publish to PyPI (Trusted Publishing / OIDC)
+        uses: pypa/gh-action-pypi-publish@release/v1
