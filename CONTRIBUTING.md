@@ -43,6 +43,11 @@ installed `loopd` command.
 
 Run the suite before pushing; CI runs it on Python 3.10–3.13 and builds the package.
 
+## Releasing
+
+Publishing to PyPI is automated — push a `vX.Y.Z` tag and the release workflow tests, builds,
+and publishes (via Trusted Publishing; no tokens). See [RELEASING.md](RELEASING.md).
+
 ## Reporting bugs & security
 
 - Bugs / ideas → [Issues](https://github.com/ruchirk22/loopd/issues).
