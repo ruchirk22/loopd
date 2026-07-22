@@ -77,6 +77,12 @@ class Config:
     forecast_max_turns: int = field(default_factory=lambda: int(_env("FORECAST_MAX_TURNS", "6")))
     # Estimator coefficients live in forecast.EstimatorConfig (env: FORECAST_*), not here.
 
+    # --- Architecture spine (binding per-project decisions; see architecture.py) ---
+    architecture_enabled: bool = field(default_factory=lambda: _env("ARCHITECTURE_ENABLED", "1") not in ("0", "false", ""))
+    # The Architect authors load-bearing decisions, so it uses the capable planner model.
+    architect_model: str = field(default_factory=lambda: _env("ARCHITECT_MODEL", "claude-opus-4-8"))
+    architect_max_turns: int = field(default_factory=lambda: int(_env("ARCHITECT_MAX_TURNS", "8")))
+
     # --- GitHub (an enhancement via the `gh` CLI; loopd never handles tokens) ---
     github_enabled: bool = field(default_factory=lambda: _env("GITHUB_ENABLED", "1") not in ("0", "false", ""))
     github_auto_pr: bool = field(default_factory=lambda: _env("GITHUB_AUTO_PR", "0") not in ("0", "false", ""))

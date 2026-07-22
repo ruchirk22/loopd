@@ -17,6 +17,11 @@ All notable changes to loopd are documented here. The format follows
 - Verification coverage: the run report and dashboard now show how many acceptance criteria are
   backed by cited evidence (e.g. "7/8 criteria backed by cited evidence") — a measurable read on
   how thoroughly a run was proven.
+- Architecture spine: before planning, an Architect proposes the binding per-project decisions
+  (stack, data model, module boundaries, API conventions, the tenancy/isolation strategy chosen
+  for this project, deploy/services, invariants) to `.agentic/architecture.md`; the owner
+  approves it (governed), and every planner turn honors it as hard context. Keeps app-scale,
+  multi-tenant builds coherent. Knobs: `ARCHITECTURE_ENABLED`, `ARCHITECT_MODEL`.
 
 ### Changed
 - The planner is directed to gate real behavior, not just units: a `flow` gate for

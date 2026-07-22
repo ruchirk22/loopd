@@ -17,7 +17,7 @@ import sys
 import time
 from typing import List, Optional, Tuple
 
-from . import analysis, developer, forecast, gates, memory, reporter
+from . import analysis, architecture, developer, forecast, gates, memory, reporter
 from .config import Config
 from .handover import Handover, build_handover
 from .ledger import BudgetExceeded, GitError, Ledger, NoChangesError
@@ -149,6 +149,7 @@ def _run(task: Optional[str], cfg: Config, ledger: Ledger, resume: bool,
     brief = seed.ensure_brief(cfg, ledger, task, resume=resume)
 
     if not resume and ledger.load_plan() is None:
+        _architecture_phase(cfg, ledger, brief)  # establish the binding spine before forecasting
         _forecast_phase(cfg, ledger, brief)   # may raise RunAborted if the user declines
     elif resume:
         _restore_constrained(cfg, ledger)     # re-forecasting is skipped; honor the prior choice
@@ -199,6 +200,56 @@ def _run(task: Optional[str], cfg: Config, ledger: Ledger, resume: bool,
 
         if ledger.needs_checkpoint():
             _checkpoint(pm, plan, ledger)
+
+
+# --------------------------------------------------------- architecture spine
+
+def _architecture_phase(cfg: Config, ledger: Ledger, brief: str) -> None:
+    """Establish the binding architecture spine before planning: the Architect proposes it, the
+    owner approves it (governed). Skipped if disabled or a spine already exists (hand-written or
+    from a prior run) — that spine is honored via the planner seed either way. Degrades quietly
+    if the proposal call fails (a spine can be written by hand)."""
+    if not cfg.architecture_enabled or architecture.exists(cfg.repo):
+        return
+    spine = architecture.propose(cfg, brief, ledger=ledger)
+    if not spine:
+        return
+    architecture.save(cfg.repo, spine)
+    rep = reporter.active()
+    rep.block("\nProposed architecture (binding for this build):\n\n" + architecture.render(spine))
+    choice = _architecture_choice(cfg)
+    if choice == "discard":
+        architecture.discard(cfg.repo)
+        rep.block("  Architecture spine discarded — proceeding without it.")
+        return
+    if choice == "edit":
+        rep.block(f"  Saved to {cfg.repo}/.agentic/architecture.md — edit it, then `loopd resume`.")
+        raise RunAborted(1, "paused for architecture review")
+    ledger.log({"event": "architecture_established",
+                "tenancy": architecture.tenancy_strategy(cfg.repo)})
+
+
+def _architecture_choice(cfg: Config):
+    if cfg.assume_yes or cfg.force:
+        return "accept"
+    if not sys.stdin.isatty():
+        reporter.active().block("  (non-interactive: architecture accepted — "
+                                "review .agentic/architecture.md)")
+        return "accept"
+    while True:
+        print("\n  Use this architecture?   [A] accept  ·  "
+              "[E] edit the file, then `loopd resume`  ·  [D] discard")
+        try:
+            ans = input("  > ").strip().lower()
+        except EOFError:
+            return "accept"
+        if ans in ("", "a", "accept", "y", "yes"):
+            return "accept"
+        if ans in ("e", "edit"):
+            return "edit"
+        if ans in ("d", "discard", "n", "no"):
+            return "discard"
+        print("  (choose A, E, or D)")
 
 
 # --------------------------------------------------------- execution forecast

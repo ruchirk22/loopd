@@ -99,6 +99,16 @@ All optional; defaults shown.
 | `FORECAST_MAX_TURNS` | `6` | lets the estimator shallow-skim the repo, not read everything |
 | `FORECAST_<COEFFICIENT>` | (see `forecast.EstimatorConfig`) | every estimator coefficient is overridable, e.g. `FORECAST_COST_PER_DEV_CALL_USD`, `FORECAST_BASE_CONTINGENCY` |
 
+### Architecture spine
+| Variable | Default | Meaning |
+|---|---|---|
+| `ARCHITECTURE_ENABLED` | `1` | before planning, an Architect proposes binding per-project decisions to `.agentic/architecture.md` (owner-approved) that every step honors; `0` disables it |
+| `ARCHITECT_MODEL` | `claude-opus-4-8` | model for the one-time architecture proposal (load-bearing, so the capable model) |
+| `ARCHITECT_MAX_TURNS` | `8` | lets the Architect skim the repo, not read everything |
+
+The spine records the project's tenancy/isolation strategy (chosen per project) and is hand-editable;
+it survives `--fresh`. See `orchestrator/architecture.py`.
+
 The dollars/minutes are computed by a **deterministic** estimator (`forecast.WeightedEstimator`)
 from the model's engineering-work estimate — the model never emits money or time. Every finished
 run appends a predicted-vs-actual record to `.agentic/forecasts.jsonl`, and the estimator folds
