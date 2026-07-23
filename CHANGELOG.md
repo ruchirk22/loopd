@@ -6,6 +6,23 @@ All notable changes to loopd are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `loopd doctor` — a preflight environment check (Python, `claude` CLI, git + commit identity,
+  auth, effective config), each with an exact fix; read-only and offline. loopd's first
+  self-built feature (planned, written, and tested by loopd running on its own repo).
+
+### Changed
+- Live cockpit never looks hung: the reporter now runs a background heartbeat that animates a
+  spinner and ticks the elapsed clock every ~0.6s, covering the previously-silent pre-loop
+  phases (architecture proposal, forecast estimate) and every long model call. It starts the
+  instant the command runs — before git setup — and a "still working" note appears when a single
+  phase runs long. Off a TTY (dashboard/CI) nothing changes: plain milestone lines only.
+
+### Fixed
+- Gate commands now run with `/dev/null` stdin so a verify command can't block on `input()` or
+  crash the next gate's interpreter after a suite that leaks file descriptors — the root cause of
+  a tty-hang surfaced by dogfooding.
+
 ## [0.2.0] — 2026-07-23
 
 A feature release: loopd's "Proof Engine", the Program Layer (architecture spine + PRD→epics),
