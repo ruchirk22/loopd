@@ -6,6 +6,11 @@ All notable changes to loopd are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-23
+
+The first release built partly by loopd on itself: a `loopd doctor` preflight command, a
+redesigned dashboard, and two robustness fixes surfaced by dogfooding.
+
 ### Added
 - `loopd doctor` — a preflight environment check (Python, `claude` CLI, git + commit identity,
   auth, effective config), each with an exact fix; read-only and offline. loopd's first
@@ -149,6 +154,7 @@ only ships changes it can prove.
   terminal outcome.
 - **pip packaging** — `pip install loopd`; stdlib-only, no dependencies.
 
+[0.3.0]: https://github.com/ruchirk22/loopd/releases/tag/v0.3.0
 [0.2.0]: https://github.com/ruchirk22/loopd/releases/tag/v0.2.0
 [0.1.3]: https://github.com/ruchirk22/loopd/releases/tag/v0.1.3
 [0.1.2]: https://github.com/ruchirk22/loopd/releases/tag/v0.1.2
