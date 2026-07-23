@@ -12,6 +12,11 @@ All notable changes to loopd are documented here. The format follows
   self-built feature (planned, written, and tested by loopd running on its own repo).
 
 ### Changed
+- Dashboard redesign — the "calm instrument" direction: a deep, atmospheric dark UI (purple
+  aurora + grain) with the loopd purple gradient as a precise signature accent, Hanken Grotesk ×
+  JetBrains Mono type (vendored offline as package assets), a **loop spine** (Plan · Forecast ·
+  Build · Verify · Prove) that tracks the live run, and **Delivery Confidence as a radial dial**.
+  The data contract and flicker-free render diffing are unchanged.
 - Live cockpit never looks hung: the reporter now runs a background heartbeat that animates a
   spinner and ticks the elapsed clock every ~0.6s, covering the previously-silent pre-loop
   phases (architecture proposal, forecast estimate) and every long model call. It starts the
