@@ -6,6 +6,33 @@ All notable changes to loopd are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-23
+
+The first release built partly by loopd on itself: a `loopd doctor` preflight command, a
+redesigned dashboard, and two robustness fixes surfaced by dogfooding.
+
+### Added
+- `loopd doctor` — a preflight environment check (Python, `claude` CLI, git + commit identity,
+  auth, effective config), each with an exact fix; read-only and offline. loopd's first
+  self-built feature (planned, written, and tested by loopd running on its own repo).
+
+### Changed
+- Dashboard redesign — the "calm instrument" direction: a deep, atmospheric dark UI (purple
+  aurora + grain) with the loopd purple gradient as a precise signature accent, Hanken Grotesk ×
+  JetBrains Mono type (vendored offline as package assets), a **loop spine** (Plan · Forecast ·
+  Build · Verify · Prove) that tracks the live run, and **Delivery Confidence as a radial dial**.
+  The data contract and flicker-free render diffing are unchanged.
+- Live cockpit never looks hung: the reporter now runs a background heartbeat that animates a
+  spinner and ticks the elapsed clock every ~0.6s, covering the previously-silent pre-loop
+  phases (architecture proposal, forecast estimate) and every long model call. It starts the
+  instant the command runs — before git setup — and a "still working" note appears when a single
+  phase runs long. Off a TTY (dashboard/CI) nothing changes: plain milestone lines only.
+
+### Fixed
+- Gate commands now run with `/dev/null` stdin so a verify command can't block on `input()` or
+  crash the next gate's interpreter after a suite that leaks file descriptors — the root cause of
+  a tty-hang surfaced by dogfooding.
+
 ## [0.2.0] — 2026-07-23
 
 A feature release: loopd's "Proof Engine", the Program Layer (architecture spine + PRD→epics),
@@ -127,6 +154,7 @@ only ships changes it can prove.
   terminal outcome.
 - **pip packaging** — `pip install loopd`; stdlib-only, no dependencies.
 
+[0.3.0]: https://github.com/ruchirk22/loopd/releases/tag/v0.3.0
 [0.2.0]: https://github.com/ruchirk22/loopd/releases/tag/v0.2.0
 [0.1.3]: https://github.com/ruchirk22/loopd/releases/tag/v0.1.3
 [0.1.2]: https://github.com/ruchirk22/loopd/releases/tag/v0.1.2

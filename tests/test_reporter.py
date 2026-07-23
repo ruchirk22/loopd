@@ -99,5 +99,53 @@ class TestCompletionSummary(unittest.TestCase):
         self.assertIn("loopd pr", out)
 
 
+class TestHeartbeat(unittest.TestCase):
+    def _spun(self, out: str) -> bool:
+        return any(ch in out for ch in reporter.Reporter._SPIN)
+
+    def test_paint_shows_a_spinner_frame_when_live(self):
+        r = reporter.Reporter(stream=io.StringIO(), live=True)
+        r.attach(time.time(), lambda: 1.0)
+        r._paint()
+        out = r.stream.getvalue()
+        self.assertTrue(self._spun(out))       # an animated spinner glyph is present
+        self.assertIn("starting", out)         # alongside the phase
+
+    def test_start_is_noop_off_tty(self):
+        r = plain()                            # live=False
+        r.start()
+        self.assertIsNone(r._hb_thread)        # no background thread spun up
+        r.finish()
+
+    def test_start_spins_then_finish_stops_the_thread(self):
+        r = reporter.Reporter(stream=io.StringIO(), live=True)
+        r.attach(time.time(), lambda: 0.0)
+        r.start(interval=0.02)
+        self.assertIsNotNone(r._hb_thread)
+        self.assertTrue(r._hb_thread.is_alive())
+        time.sleep(0.08)                       # let a few heartbeats paint
+        r.finish()
+        self.assertIsNone(r._hb_thread)        # finish() joined + cleared the thread
+        self.assertTrue(self._spun(r.stream.getvalue()))
+
+    def test_paused_suspends_painting(self):
+        r = reporter.Reporter(stream=io.StringIO(), live=True)
+        r.attach(time.time(), lambda: 0.0)
+        r._paint()                             # paints once (spinner on screen)
+        with r.paused():
+            before = r.stream.getvalue()
+            r._paint()                         # must be suppressed while paused
+            self.assertEqual(r.stream.getvalue(), before)
+        # a clean-line clear was emitted entering the pause
+        self.assertIn("\033[K", r.stream.getvalue())
+
+    def test_long_phase_adds_still_working_hint(self):
+        r = reporter.Reporter(stream=io.StringIO(), live=True)
+        r.attach(time.time(), lambda: 0.0)
+        r._phase_since = time.time() - 30       # phase has been running 30s
+        r._paint()
+        self.assertIn("still working", r.stream.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

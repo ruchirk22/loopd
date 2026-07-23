@@ -40,15 +40,21 @@ def run(task: Optional[str], cfg: Config, resume: bool = False, fresh: bool = Fa
     # is resumable but has no ledger yet to escalate through — report and exit 1.
     # `on_start` (optional callable) fires once the run begins building, after the forecast
     # decision — the CLI uses it for its "I've got it from here" delegation reassurance.
+    session_t0 = time.time()  # active time of THIS invocation (excludes idle between resumes)
+    rep = reporter.active()
+    # Start the live spinner IMMEDIATELY — before the (silent) git setup below — so there is
+    # never a keystroke-to-feedback gap where loopd looks hung. Cost source is wired once the
+    # ledger exists a few lines down.
+    rep.attach(session_t0, lambda: 0.0)
+    rep.start()  # heartbeat: keep the live line moving through every phase (incl. the pre-loop calls)
     try:
         ledger = Ledger.load_or_start(cfg, resume=resume, fresh=fresh)
     except GitError as exc:
+        rep.finish()
         print(f"\nStopping on a git error during setup: {exc}\n"
               "Fix the repo state, then retry (--resume-run if a run was in progress).")
         return 1
-    session_t0 = time.time()  # active time of THIS invocation (excludes idle between resumes)
-    rep = reporter.active()
-    rep.attach(session_t0, lambda: ledger.state.get("total_cost_usd", 0.0))
+    rep.attach(session_t0, lambda: ledger.state.get("total_cost_usd", 0.0))  # real spend source
     code, detail = 1, ""
     try:
         code = _run(task, cfg, ledger, resume, on_start=on_start, resume_choice=resume_choice)
@@ -227,13 +233,16 @@ def _architecture_phase(cfg: Config, ledger: Ledger, brief: str) -> None:
     if the proposal call fails (a spine can be written by hand)."""
     if not cfg.architecture_enabled or architecture.exists(cfg.repo):
         return
+    rep = reporter.active()
+    rep.phase("reviewing the codebase & proposing architecture")  # a live label during the model call
     spine = architecture.propose(cfg, brief, ledger=ledger)
     if not spine:
         return
     architecture.save(cfg.repo, spine)
-    rep = reporter.active()
-    rep.block("\nProposed architecture (binding for this build):\n\n" + architecture.render(spine))
-    choice = _architecture_choice(cfg)
+    # Pause the heartbeat so the proposal + the accept prompt render cleanly (no spinner over them).
+    with rep.paused():
+        rep.block("\nProposed architecture (binding for this build):\n\n" + architecture.render(spine))
+        choice = _architecture_choice(cfg)
     if choice == "discard":
         architecture.discard(cfg.repo)
         rep.block("  Architecture spine discarded — proceeding without it.")
@@ -275,6 +284,8 @@ def _forecast_phase(cfg: Config, ledger: Ledger, brief: str) -> None:
     whether to raise the budget, proceed constrained, edit it, or abort. Mutates cfg.budget_usd
     / ledger.state['budget_usd'] / cfg.constrained per the decision and persists the forecast."""
     requested_constrained = bool(cfg.constrained)  # an explicit --constrained must never be lost
+    rep = reporter.active()
+    rep.phase("estimating the work")  # a live label during the forecast model call
     try:
         fc = forecast.run_forecast(cfg, brief, cfg.budget_usd, ledger=ledger)
     except BudgetExceeded:
@@ -284,9 +295,10 @@ def _forecast_phase(cfg: Config, ledger: Ledger, brief: str) -> None:
         return
     if fc is None:
         return  # forecasting disabled or the estimate failed — proceed exactly as before
-    print(forecast.render_card(fc))
-
-    choice, edited = _forecast_choice(cfg, fc)
+    # Pause the heartbeat so the forecast card + the budget prompt render cleanly.
+    with rep.paused():
+        print(forecast.render_card(fc))
+        choice, edited = _forecast_choice(cfg, fc)
     dec = forecast.apply_choice(fc, choice, edited)
     if dec.action == "abort":
         # A cost decision, not an engineering failure: mark it operational so the finally

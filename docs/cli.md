@@ -55,6 +55,7 @@ alias loopd="python3 /path/to/loopd/loopd"     # add to ~/.zshrc / ~/.bashrc
 | `loopd projects` | Your recent projects (aka `loopd history`). |
 | `loopd ui` | Open the live dashboard in a browser. |
 | `loopd config` | Show the effective settings and where things live. |
+| `loopd doctor` | Preflight your environment — checks Python, the `claude` CLI, git + commit identity, auth, and the effective config, with an exact fix for each problem. Read-only and offline. |
 | `loopd help` | This command list. |
 | `loopd version` | Print the loopd version. |
 

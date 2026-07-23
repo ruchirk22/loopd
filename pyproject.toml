@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "loopd"
-version = "0.2.0"
+version = "0.3.0"
 description = "An autonomous engineering runtime that only ships changes it can prove."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -50,4 +50,4 @@ include-package-data = false
 # `loopd` works without a source checkout. Only the two assets the dashboard actually serves
 # are bundled — design_system.png (internal reference) and loopd.png are deliberately excluded
 # to keep the wheel small.
-orchestrator = ["prompts/*.md", "assets/loopd.svg", "assets/loopd_no_bg.png"]
+orchestrator = ["prompts/*.md", "assets/loopd.svg", "assets/loopd_no_bg.png", "assets/*.woff2"]
