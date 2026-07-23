@@ -50,4 +50,4 @@ include-package-data = false
 # `loopd` works without a source checkout. Only the two assets the dashboard actually serves
 # are bundled — design_system.png (internal reference) and loopd.png are deliberately excluded
 # to keep the wheel small.
-orchestrator = ["prompts/*.md", "assets/loopd.svg", "assets/loopd_no_bg.png"]
+orchestrator = ["prompts/*.md", "assets/loopd.svg", "assets/loopd_no_bg.png", "assets/*.woff2"]
