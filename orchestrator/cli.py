@@ -37,7 +37,7 @@ except Exception:
 
 SUBCOMMANDS = {
     "ui", "status", "plan", "logs", "report", "memory", "projects", "history",
-    "resume", "new", "build", "clone", "pr", "config", "help", "version",
+    "resume", "new", "build", "clone", "pr", "config", "doctor", "help", "version",
 }
 
 # --------------------------------------------------------------- voice
@@ -60,9 +60,16 @@ def say(msg: str = "") -> None:
     print(msg)
 
 
+def _interactive() -> bool:
+    """A real human session needs a terminal on BOTH ends. stdout matters too: when output is
+    piped or captured (CI, the gate runner, a test harness) there's nobody to answer a prompt,
+    so we must never block on input() — even if an idle tty happens to be inherited on stdin."""
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
 def _prompt(q: str) -> Optional[str]:
     """Ask a question only when there's a human at the keyboard; otherwise return None."""
-    if not sys.stdin.isatty():
+    if not _interactive():
         return None
     try:
         return input(q).strip()
@@ -127,7 +134,9 @@ def _first_run_wizard() -> None:
 
 
 def _maybe_onboard() -> None:
-    if workspace.is_configured() or not sys.stdin.isatty():
+    # The wizard prompts (and may launch `gh auth login`), so it must only run in a real
+    # terminal session — never when stdin is an inherited-but-idle tty under automation.
+    if workspace.is_configured() or not _interactive():
         return
     try:
         _first_run_wizard()
@@ -760,6 +769,16 @@ def cmd_config(argv: List[str]) -> int:
     return 0
 
 
+def cmd_doctor(argv: List[str]) -> int:
+    """Preflight the environment before a run. All logic lives in the doctor module; this is a
+    thin surface that renders the report and returns doctor's exit code. Extra args are ignored,
+    consistent with the other ambient verbs."""
+    from . import doctor
+    results, code = doctor.run_checks()
+    doctor.render(results)
+    return code
+
+
 def cmd_help(argv: Optional[List[str]] = None) -> int:
     say(_b("loopd") + _dim(" — an autonomous engineering runtime that only ships changes it can prove."))
     say(_dim("        It plans, forecasts, builds, verifies, recovers, remembers, and delivers work."))
@@ -783,6 +802,7 @@ def cmd_help(argv: Optional[List[str]] = None) -> int:
     say("  loopd memory                   " + _dim("what loopd has learned about this project"))
     say("  loopd projects                 " + _dim("your recent projects"))
     say("  loopd ui                       " + _dim("open the live dashboard in a browser"))
+    say("  loopd doctor                   " + _dim("check your environment is ready to run loopd"))
     say()
     say(_b("  Handy flags") + _dim("  (on any build command)"))
     say("  --budget N   --yes   --force   --constrained   --no-forecast   --forecast-only   --quiet")
@@ -810,7 +830,7 @@ DISPATCH = {
     "ui": cmd_ui, "status": cmd_status, "plan": cmd_plan, "logs": cmd_logs,
     "report": cmd_report, "memory": cmd_memory, "projects": cmd_projects,
     "history": cmd_projects, "resume": cmd_resume, "new": cmd_new, "build": cmd_build,
-    "clone": cmd_clone, "pr": cmd_pr, "config": cmd_config,
+    "clone": cmd_clone, "pr": cmd_pr, "config": cmd_config, "doctor": cmd_doctor,
 }
 
 
