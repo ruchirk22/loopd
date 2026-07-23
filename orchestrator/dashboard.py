@@ -1008,6 +1008,48 @@ function stateKind(s){
   if(s.finished) return "report";
   return "needs"; // stopped/paused with work on disk
 }
+/* the loop spine (signature): Plan · Forecast · Build · Verify · Prove, mapped from real state.
+   Honest, not fake precision — stages reflect what has actually happened, not a scripted animation. */
+function spineHTML(s,kind){
+  const c=s.counts||{}; const total=c.total||0; const done=(c.done||0)+(c.skipped||0);
+  const hasPlan=((s.steps||[]).length>0)||!!s.plan_summary;
+  const hasFc=!!(s.forecast&&s.forecast.estimated_cost_usd!=null);
+  const buildDone=total>0&&done>=total;
+  let cls;
+  if(kind==="report"){ cls=["done","done","done","done","done"]; }
+  else if(kind==="empty"){ cls=["","","","",""]; }
+  else {
+    const plan=hasPlan?"done":(kind==="active"?"active":"");
+    const fc=hasFc?"done":(hasPlan?"done":"");         // planning is behind us once a plan exists
+    let build="",verify="";
+    if(buildDone){ build="done"; verify=(kind==="needs"?"stuck":"active"); }
+    else if(hasPlan){ build=(kind==="needs"?"stuck":"active"); }
+    cls=[plan,fc,build,verify,""];
+  }
+  const labels=["Plan","Forecast","Build","Verify","Prove"];
+  const gl=(c2,i)=> c2==="done"?"&#10003;" : c2==="active"?"&#9136;" : c2==="stuck"?"!" : String(i+1);
+  let html="";
+  labels.forEach((lb,i)=>{
+    if(i>0){ const linkDone=cls[i-1]==="done"; const flow=cls[i]==="active"&&cls[i-1]==="done";
+      html+=`<div class="link${linkDone?" done":""}${flow?" flow":""}"></div>`; }
+    html+=`<div class="stage ${cls[i]}"><span class="node">${gl(cls[i],i)}</span><span class="lbl">${lb}</span></div>`;
+  });
+  return `<div class="spine">${html}</div>`;
+}
+/* Delivery confidence as a radial instrument (arc = brand gradient; band label = semantic). */
+function dialCard(cf){
+  const C=502.65, score=Math.min(100,Math.max(0,cf.score||0)), off=C*(1-score/100);
+  const bandColor=cf.meets_bar?"var(--good)":(score>=50?"var(--attention)":"var(--bad)");
+  const facs=(cf.factors||[]).map(x=>{const v=Math.round((x.value||0)*100);
+    return `<div class="fac"><span class="fl">${esc(x.label||x.key||"")}</span><span class="fb"><i style="width:${v}%"></i></span><span class="fv">${v}</span></div>`;}).join("");
+  return `<div class="card dial-card"><h3>Delivery confidence</h3>
+    <div class="dial"><svg width="184" height="184" viewBox="0 0 184 184">
+      <defs><linearGradient id="dialgrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7C7CFF"/><stop offset="1" stop-color="#9D7CFF"/></linearGradient></defs>
+      <circle class="track" cx="92" cy="92" r="80" fill="none" stroke-width="12"/>
+      <circle class="arc" cx="92" cy="92" r="80" fill="none" stroke-width="12" stroke-dasharray="${C.toFixed(1)}" stroke-dashoffset="${off.toFixed(1)}"/>
+    </svg><div class="mid"><div class="num">${score}%</div><div class="band" style="color:${bandColor}">${esc(cf.band||"")}</div>${cf.meets_bar?'<div class="cap">meets the &gt;75% bar</div>':""}</div></div>
+    <div class="factors">${facs}</div></div>`;
+}
 function renderProject(s){
   const k=stateKind(s);
   if(k==="active"){setDot("working","working");}
@@ -1113,7 +1155,7 @@ function viewActive(s){
   const f=s.forecast||{}; const budget=(f.chosen_budget_usd||s.budget_usd||0);
   const spentPct=budget?Math.min(100,100*(s.total_cost_usd/budget)):0;
   const fmark=(budget&&f.estimated_cost_usd)?Math.min(100,100*(f.estimated_cost_usd/budget)):null;
-  return `<div class="cols"><div>
+  return `${spineHTML(s,"active")}<div class="cols"><div>
     <div class="hero">
       <div class="state"><span>&#9679; Working</span><span>step ${Math.min(s.step_index||c.done,c.total)} of ${c.total}</span></div>
       <div class="headline">${head}</div>
@@ -1158,7 +1200,7 @@ function viewNeeds(s){
     const why=e.reason==="budget_exceeded"?"I reached the budget for this run."
       :e.reason==="wall_clock_exceeded"?"I hit the time limit for this run."
       :(e.detail?esc(e.detail.split("\n")[0]):"The run stopped and is waiting for you.");
-    return `<div class="cols"><div>
+    return `${spineHTML(s,"needs")}<div class="cols"><div>
       <div class="hero attn"><div class="state"><span>&#9650; Paused</span><span>${c.done||0} of ${c.total||0} done</span></div>
         <div class="headline sm">${esc(why)}</div>
         <div class="actions"><button class="primary" onclick="applyFix(null,'')">Resume</button>
@@ -1176,7 +1218,7 @@ function viewNeeds(s){
       <span class="ol">${esc(o.label)}${o.recommended?' <span class="rtag">recommended</span>':""}</span>
       ${o.detail?`<span class="od">${esc(o.detail)}</span>`:""}
     </label>`).join("");
-  return `<div class="cols"><div>
+  return `${spineHTML(s,"needs")}<div class="cols"><div>
     <div class="hero attn">
       <div class="state"><span>&#9650; I need you for a moment</span><span>${a.step?("paused at step "+esc(a.step)):((c.done||0)+" of "+(c.total||0)+" done")}</span></div>
       <div class="fa">
@@ -1214,11 +1256,7 @@ function viewReport(s){
   const covLine=cov.total?` &nbsp;&nbsp; &#10003; ${cov.evidenced}/${cov.total} criteria backed by evidence`:"";
   const cf=s.confidence||null;
   const confBadge=(cf&&cf.score!=null)?` &nbsp;&nbsp; &#10003; ${cf.score}% delivery confidence (${cf.band})`:"";
-  const confCard=(cf&&cf.score!=null)?`<div class="card"><h3>Delivery confidence</h3>
-      <div style="font-size:30px;font-weight:700;color:${cf.meets_bar?'var(--good)':'var(--fg)'}">${cf.score}%
-        <span style="font-size:14px;font-weight:600;color:var(--mut)">${esc(cf.band)}${cf.meets_bar?" &middot; meets the &gt;75% bar":""}</span></div>
-      ${(cf.factors||[]).map(x=>`<div class="va"><span class="k">${esc(x.label||x.key||"")}</span><span class="v">${Math.round((x.value||0)*100)}%</span></div>`).join("")}
-    </div>`:"";
+  const confCard=(cf&&cf.score!=null)?dialCard(cf):"";
   const vt=`<div class="tiles">
     <div class="card"><h3>Forecast vs actual</h3>
       ${vaRow("cost",money(f.estimated_cost_usd),money(a.cost_usd))}
@@ -1239,6 +1277,7 @@ function viewReport(s){
     <div class="card"><h3>The work &middot; ${c.total||0} steps</h3>${workList(s)}</div>
   </div>`;
   return `<div class="screen">
+    ${spineHTML(s,"report")}
     <div class="hero done">
       <div class="state"><span>&#10003; Delivered</span><span>${dur(s.elapsed_s)} &middot; ${money(s.total_cost_usd)}</span></div>
       <div class="headline">loopd finished the work.</div>
