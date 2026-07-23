@@ -42,7 +42,13 @@ def _run_one(cmd: str, cwd: Path, timeout_s: int, logs: List[str]) -> bool:
     logs.append(f"$ {real_cmd}")
     # start_new_session=True => the child is its own process-group leader (pgid == pid),
     # so we can kill the whole tree on timeout.
+    # stdin=DEVNULL: a gate command has no human to answer it. Never inherit loopd's stdin —
+    # an interactive tty makes a prompting command (e.g. a test that hits input()) block until
+    # the timeout, and a stdin left in a bad state by a prior command crashes the next
+    # interpreter at startup ("can't initialize sys standard streams"). /dev/null gives every
+    # command a valid, immediately-EOF stdin regardless of how loopd itself was launched.
     proc = subprocess.Popen(real_cmd, cwd=str(cwd), shell=True, start_new_session=True,
+                            stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
         out, _ = proc.communicate(timeout=per_timeout)
